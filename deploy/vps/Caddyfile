@@ -1,0 +1,7 @@
+# Replace with your real domain (its DNS "A" record must point to this server's IP). Caddy gets the HTTPS certificate by itself.
+www.your-domain.com, your-domain.com {
+	reverse_proxy app:8080
+	request_body {
+		max_size 30MB
+	}
+}

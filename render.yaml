@@ -1,0 +1,30 @@
+# Render Blueprint: the BACKEND (API, database, emails). The front-end is deployed separately on Vercel (frontend/).
+# Needs a PAID instance: free Render services block outbound SMTP (Gmail), so "Application submitted" emails would
+# never be sent, and free services have no persistent disk (the database would be wiped on every deploy).
+services:
+  - type: web
+    name: otw-logistics-api
+    runtime: node
+    rootDir: backend
+    plan: starter
+    region: singapore          # closest Render region to India
+    buildCommand: npm ci --omit=dev --no-audit --no-fund
+    startCommand: node server.js
+    healthCheckPath: /api/support-info
+    disk:
+      name: otw-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - { key: NODE_VERSION, value: "22" }
+      - { key: DATA_DIR, value: /data }
+      - { key: TRUST_PROXY, value: "2" }          # Vercel + Render are two proxies in front of the app
+      # Your public website address on Vercel (https, no trailing slash). Emails and sign-in checks use it.
+      - { key: PUBLIC_URL, sync: false }
+      - { key: ALLOWED_ORIGIN, sync: false }       # same value as PUBLIC_URL
+      # The Render address and the Vercel domain, comma separated, no https://  e.g. otw-logistics-api.onrender.com,www.your-domain.com
+      - { key: ALLOWED_HOSTS, sync: false }
+      - { key: GMAIL_USER, sync: false }
+      - { key: GMAIL_APP_PASSWORD, sync: false }   # 16-letter Google App Password
+      - { key: SUPPORT_EMAIL, sync: false }
+      - { key: ADMIN_EMAIL, sync: false }          # who is told about new applications (optional)

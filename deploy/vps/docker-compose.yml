@@ -1,0 +1,28 @@
+# Runs the app + automatic HTTPS (Caddy). Use on any small Linux server (VPS).
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/vps/Dockerfile
+    restart: unless-stopped
+    env_file: ../../backend/.env.production
+    volumes:
+      - otw-data:/data
+    expose:
+      - "8080"
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+volumes:
+  otw-data:
+  caddy-data:
+  caddy-config:

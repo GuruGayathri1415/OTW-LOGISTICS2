@@ -1,0 +1,10 @@
+**/node_modules
+**/.env
+**/.env.*
+!**/.env.example
+**/*.sqlite*
+**/uploads
+backend/FIRST-ADMIN-PASSWORDS.txt
+backend/ADMIN-TEMPORARY-LOGIN-CREDENTIALS.txt
+*.zip
+.git
