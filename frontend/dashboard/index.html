@@ -276,6 +276,9 @@
                     d="M12 2a10 10 0 0 0-10 10v5a3 3 0 0 0 3 3h2v-8H5v-.1a7 7 0 0 1 14 0V19h-3v2h3a3 3 0 0 0 3-3v-5A10 10 0 0 0 12 2Z"
                   /></svg></span
               ><span>Support</span>
+              <span id="supportAlertBadge" class="support-red-alert" hidden
+                >0</span
+              >
             </button>
             <button class="nav" data-page="reports">
               <span class="nav-icon"
@@ -313,16 +316,38 @@
       </div>
     </div>
     <script src="lib/xlsx.full.min.js"></script>
-    <script>window.XLSX||document.write('<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"><\/script>');</script>
+    <script>
+      window.XLSX ||
+        document.write(
+          '<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"><\/script>',
+        );
+    </script>
     <script src="hub-excel.js"></script>
     <script src="hub-management.js"></script>
     <script src="location-management.js"></script>
     <script src="lib/chart.umd.js"></script>
-    <script>window.Chart||document.write('<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"><\/script>');</script>
+    <script>
+      window.Chart ||
+        document.write(
+          '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"><\/script>',
+        );
+    </script>
     <script src="lib/jspdf.umd.min.js"></script>
-    <script>window.jspdf||document.write('<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"><\/script>');</script>
+    <script>
+      window.jspdf ||
+        document.write(
+          '<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"><\/script>',
+        );
+    </script>
     <script src="lib/jspdf.plugin.autotable.min.js"></script>
-    <script>(window.jspdf&&window.jspdf.jsPDF&&window.jspdf.jsPDF.API.autoTable)||document.write('<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"><\/script>');</script>
+    <script>
+      (window.jspdf &&
+        window.jspdf.jsPDF &&
+        window.jspdf.jsPDF.API.autoTable) ||
+        document.write(
+          '<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"><\/script>',
+        );
+    </script>
     <script src="payment-excel.js"></script>
     <script src="partner-riders.js"></script>
     <script src="reports.js"></script>

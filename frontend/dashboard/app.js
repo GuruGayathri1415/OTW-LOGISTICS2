@@ -99,9 +99,151 @@ function showApp() {
   if (new URLSearchParams(location.search).has("drive"))
     history.replaceState(null, "", location.pathname);
   startPartnerPolling();
+  startSupportAlertPolling();
   initHubs().catch(() => {});
   checkPasswordHelpRequests();
 }
+
+// ---------- Live Red Alert on Support Sidebar Button ----------
+let supportAlertTimer = null;
+let knownOpenSupportCount = null;
+let supportAlertOpenCount = 0;
+
+function updateSupportNavRedAlert(openCount) {
+  supportAlertOpenCount = Number(openCount || 0);
+  const btn = document.querySelector('.nav[data-page="support"]');
+  if (!btn) return;
+
+  btn.classList.toggle("support-has-alert", supportAlertOpenCount > 0);
+
+  let badge = btn.querySelector(".support-red-badge");
+  if (supportAlertOpenCount <= 0) {
+    badge?.remove();
+    return;
+  }
+
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.className = "support-red-badge";
+    btn.appendChild(badge);
+  }
+  badge.textContent = supportAlertOpenCount > 99 ? "99+" : String(supportAlertOpenCount);
+  badge.title = `${supportAlertOpenCount} open support ticket${supportAlertOpenCount === 1 ? "" : "s"}`;
+}
+
+function showSupportRedPopup(count) {
+  const existing = document.getElementById("supportRedPopupBanner");
+  if (existing) existing.remove();
+
+  const banner = document.createElement("div");
+  banner.id = "supportRedPopupBanner";
+  banner.setAttribute("role", "alert");
+  banner.style.cssText = [
+    "position:fixed",
+    "top:16px",
+    "right:16px",
+    "z-index:10000",
+    "background:#dc2626",
+    "color:#ffffff",
+    "padding:12px 16px",
+    "border-radius:10px",
+    "box-shadow:0 10px 25px rgba(220,38,38,0.4)",
+    "font-weight:600",
+    "font-size:13.5px",
+    "cursor:pointer",
+    "display:flex",
+    "align-items:center",
+    "gap:10px",
+    "max-width:380px",
+  ].join(";");
+
+  banner.innerHTML =
+    `<span>🚨 New Support Ticket Raised (${esc(count)} open) — Click to open Support</span>` +
+    `<button type="button" aria-label="Dismiss" style="background:transparent;border:0;color:#fff;font-size:16px;line-height:1;cursor:pointer;padding:0 2px;">✕</button>`;
+
+  banner.addEventListener("click", (e) => {
+    if (e.target.tagName === "BUTTON") {
+      banner.remove();
+      return;
+    }
+    render("support");
+    $("#sidebar")?.classList.remove("open");
+    banner.remove();
+  });
+
+  document.body.appendChild(banner);
+  setTimeout(() => banner.remove(), 9000);
+}
+
+async function checkSupportTicketsAlert({ notifyOnIncrease = true } = {}) {
+  if (!currentUser || currentUser.role !== "admin") return;
+  try {
+    const base =
+      window.OTW_API_BASE ||
+      (location.protocol === "file:" || ["5500", "5501"].includes(location.port)
+        ? "http://localhost:8080"
+        : location.origin);
+
+    const endpoints = [`${base}/api/admin/support`, `${base}/api/support/tickets`];
+    let payload = null;
+
+    for (const url of endpoints) {
+      const r = await fetch(url, {
+        credentials: "include",
+        cache: "no-store",
+      });
+      if (r.status === 401) return sessionEnded();
+      if (r.ok) {
+        payload = await r.json().catch(() => ({}));
+        break;
+      }
+    }
+    if (!payload) return;
+
+    const list = Array.isArray(payload)
+      ? payload
+      : payload.tickets || payload.items || payload.rows || [];
+
+    const openCount = list.filter((t) => {
+      const st = String(t.status || t.ticketStatus || "New")
+        .trim()
+        .toLowerCase();
+      return st !== "resolved" && st !== "closed";
+    }).length;
+
+    updateSupportNavRedAlert(openCount);
+
+    if (
+      notifyOnIncrease &&
+      knownOpenSupportCount !== null &&
+      openCount > knownOpenSupportCount
+    ) {
+      showSupportRedPopup(openCount);
+      toast(`New support ticket raised (${openCount} open)`);
+    }
+    knownOpenSupportCount = openCount;
+  } catch (_) {
+    // Ignore transient network errors during background polling
+  }
+}
+
+function startSupportAlertPolling() {
+  stopSupportAlertPolling();
+  knownOpenSupportCount = null;
+  checkSupportTicketsAlert({ notifyOnIncrease: false });
+  supportAlertTimer = setInterval(
+    () => checkSupportTicketsAlert({ notifyOnIncrease: true }),
+    15000,
+  );
+}
+
+function stopSupportAlertPolling() {
+  if (supportAlertTimer) {
+    clearInterval(supportAlertTimer);
+    supportAlertTimer = null;
+  }
+}
+
 function strongPassword(p) {
   return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/.test(p);
 }
@@ -220,6 +362,8 @@ $("#spCancel").onclick = async () => {
 };
 $("#logoutBtn").onclick = async () => {
   stopPartnerPolling();
+  stopSupportAlertPolling();
+  updateSupportNavRedAlert(0);
   await authCall("/logout").catch(() => {});
   currentUser = null;
   showAuth();
@@ -228,6 +372,8 @@ $("#logoutBtn").onclick = async () => {
 function sessionEnded() {
   if (!currentUser) return;
   stopPartnerPolling();
+  stopSupportAlertPolling();
+  updateSupportNavRedAlert(0);
   currentUser = null;
   closeModal();
   showAuth();
@@ -448,6 +594,7 @@ function render(page) {
   if (page === "notifications") bindNotifications();
   if (page === "reports") bindReports();
   if (typeof updatePartnerNavCount === "function") updatePartnerNavCount();
+  if (supportAlertOpenCount > 0) updateSupportNavRedAlert(supportAlertOpenCount);
 }
 function dashboard() {
   const active = db.riders.filter((r) => r.status === "Active").length;
@@ -505,11 +652,7 @@ function dashboard() {
     .join("")}</tbody></table></div></div>
 </div>`;
 }
-// Dashboard figures from the saved weekly payments (the same rows as Payments and Reports). Only verified riders are
-// counted, as in Reports. Total Orders uses the Reports rule: the saved Total Orders, else LM + Prime + Club.
 function dashboardWeeklyStats() {
-  // Reload in the background when the rows are older than 10 seconds (payment status may have changed on Reports or
-  // Payments); loadWeeklyPayments repaints the dashboard only when something changed.
   if (
     !weeklyStore.loading &&
     (!weeklyStore.loadedAt || Date.now() - weeklyStore.loadedAt > 10000)
@@ -600,13 +743,10 @@ function bindDashboard() {
   $$("[data-go]").forEach((b) => (b.onclick = () => render(b.dataset.go)));
   $("#dashboardRefresh")?.addEventListener("click", async () => {
     syncPartnerApplications();
-    await Promise.all([loadWeeklyPayments(), rrLoad({ quiet: true })]);
+    await Promise.all([loadWeeklyPayments(), rrLoad({ quiet: true }), checkSupportTicketsAlert({ notifyOnIncrease: false })]);
     if (currentPage === "dashboard") render("dashboard");
     toast("Dashboard refreshed");
   });
-}
-{
-  $$("[data-go]").forEach((b) => (b.onclick = () => render(b.dataset.go)));
 }
 const RIDER_PAGE_SIZES = [10, 25, 50, 100];
 const riderView = { page: 1, size: 10, q: "" };
@@ -645,7 +785,6 @@ function riders() {
     `<div class="card"><input class="search" id="riderSearch" value="${esc(riderView.q)}" placeholder="Search rider name, ID or phone..."><div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Rider ID</th><th>Phone</th><th>Location</th><th>Hub</th><th>Status</th><th>Actions</th></tr></thead><tbody id="riderRows"></tbody></table></div><div id="riderPager"></div></div>`
   );
 }
-// "Added by" line under a rider's name, for riders that came from a Vendor / Franchise / Admin registration.
 function riderAddedBy(r) {
   if (!r.registrationId || !r.appliedBy) return "";
   const who = [r.appliedBy, r.ownerLoginId, r.ownerName].filter(Boolean).join(" · ");
@@ -701,8 +840,6 @@ function bindRiders() {
   paintRiders();
   syncRiderMasterDirectory();
 }
-// Riders page: registrations waiting for approval (added by a Vendor, a Franchise or an admin), newest first.
-// Approving one moves it into the Riders list below.
 function paintPendingRiders() {
   const card = $("#riderPendingCard");
   if (!card) return;
@@ -714,7 +851,6 @@ function paintPendingRiders() {
   const fromPartners = list.filter((r) => r.ownerLoginId).length;
   card.innerHTML = `<div class="section-head"><div><h3>⏳ Waiting for approval (${list.length})</h3><p class="muted">${fromPartners ? `${fromPartners} added by Vendors / Franchises. ` : ""}Approve a rider to move them into the Riders list below; Reject needs a reason.</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Rider ID</th><th>Rider Name</th><th>Mobile Number</th><th>Hub Pincode</th><th>Hub Location</th><th>Selfie</th><th>Aadhaar</th><th>Added By</th><th>Added On</th><th>Status</th><th>Action</th></tr></thead><tbody>${list.map(rrRow).join("")}</tbody></table></div>`;
 }
-// Riders menu item: how many registrations are waiting for approval.
 function updateRiderNavCount() {
   const n = (rrItems || []).filter((r) => r.status === "PENDING").length;
   const btn = document.querySelector('.nav[data-page="riders"]');
@@ -729,10 +865,6 @@ function updateRiderNavCount() {
   b.textContent = n;
   b.title = `${n} rider${n === 1 ? "" : "s"} waiting for approval`;
 }
-
-// Master directory supplied by the administrator. Only complete, unambiguous names are included;
-// rows with clipped names or unavailable phone numbers never overwrite an existing phone number.
-
 function normRiderMasterName(value) {
   return String(value || "")
     .normalize("NFKD")
@@ -771,7 +903,6 @@ async function syncRiderMasterDirectory() {
         localChanged++;
       }
       matched.push(master);
-      const oldId = String(rider.id);
       for (const list of [db.work, db.payments, db.weeklyPayments])
         if (Array.isArray(list))
           for (const item of list) {
@@ -920,8 +1051,7 @@ function riderEditModal(r, reg = null) {
           savedRegistration,
           ...rrItems.filter((x) => x.id !== savedRegistration.id),
         ];
-      const oldName = r.name,
-        oldId = r.id;
+      const oldName = r.name;
       Object.assign(r, {
         id: v.id,
         name: v.name,
@@ -1088,9 +1218,6 @@ window.viewRider = async (id) => {
   });
 };
 const docSearch = { query: "" };
-// A document belongs to a rider by Rider ID when it has one (all new uploads do); older records only have the rider's name.
-// Rider documents are stored on the server (Admin Portal > Documents), so every admin sees the same files.
-// Entries saved by older versions of this page kept only the file name in this browser; they are listed as such.
 let adminDocs = [],
   adminDocsLoaded = false;
 async function loadAdminDocs() {
@@ -1128,7 +1255,6 @@ function docRowHtml(d) {
     return `<div class="uploaded-doc"><span><b>${esc(d.type)}</b> • ${esc(d.file)}</span><span><small>${esc(d.date)}</small> <button class="btn-sm" onclick="viewDoc('${esc(d.id)}')">View</button> <button class="btn-sm danger" onclick="deleteDoc('${esc(d.id)}')">Delete</button></span></div>`;
   return `<div class="uploaded-doc legacy-doc"><span><b>${esc(d.type)}</b> • ${esc(d.file)} <small class="muted">(file not stored by the older version; please upload it again)</small></span><span><small>${esc(d.date)}</small> <button class="btn-sm danger" onclick="deleteDoc('${esc(d.id)}')">Remove</button></span></div>`;
 }
-// Extra spellings so "pan card", "license", "aadhar" or "registration" find the matching category.
 function docTypeAliases(type) {
   const t = String(type || "").toLowerCase();
   const out = [];
@@ -1159,8 +1285,6 @@ function docRiderMatches(r, raw, q) {
     .toLowerCase();
   return hay.includes(raw) || (q && normText(hay).includes(q));
 }
-// Rider name / ID match -> that rider with ALL their documents. Otherwise a rider is shown when some of their documents
-// match, with only those documents. Empty search -> every rider with every document.
 function documentSections() {
   const raw = String(docSearch.query || "")
     .trim()
@@ -1197,7 +1321,6 @@ function documentsListHtml() {
 function documentsSearchHtml() {
   return `<div style="position:relative;width:380px;max-width:100%"><span aria-hidden="true" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);opacity:.65;pointer-events:none">🔍</span><input class="search" id="docSearch" type="search" placeholder="Search rider name, Rider ID or document..." aria-label="Search riders and documents" value="${esc(docSearch.query)}" autocomplete="off" style="width:100%;padding-left:38px;padding-right:38px"><button type="button" id="docSearchClear" aria-label="Clear search" title="Clear search" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);border:0;background:transparent;color:inherit;font-size:16px;line-height:1;cursor:pointer;padding:4px 6px;display:${docSearch.query ? "block" : "none"}">✕</button></div>`;
 }
-// Admin Portal > Documents: the page lists the uploaded documents (table) and the rider cards below it.
 const DOC_UPLOAD_TYPES = [
   "Aadhaar / ID Proof",
   "PAN Card",
@@ -1214,7 +1337,6 @@ const docDate = (iso) => new Date(iso).toLocaleDateString("en-IN");
 function docMatchesSearch(hay, raw, q) {
   return hay.includes(raw) || (q && normText(hay).includes(q));
 }
-// Uploaded documents (server records) shown in the table; the same search box filters it.
 function uploadedDocsRows() {
   const raw = String(docSearch.query || "").trim().toLowerCase();
   const q = normText(raw);
@@ -1287,11 +1409,7 @@ function bindDocuments() {
     if (currentPage === "documents" && $("#documentsList")) paint();
   });
 }
-// ---------- Upload / replace a rider document (Admin Portal > Documents) ----------
-// Rider: searchable list of registered riders (name and Rider ID). Document: one required file.
-// Selfie / screenshot: optional, separate file, linked to the same Rider ID.
 const riderLabelOf = (id, name) => (id ? `${name || ""} (${id})`.trim() : "");
-// Registered riders only: riders that came from payment imports without a registration are left out.
 function docRiderChoices() {
   return (db.riders || [])
     .filter((r) => r.id && !r.provisional)
@@ -1313,7 +1431,6 @@ function upsertDocItem(item) {
   adminDocs = [item, ...adminDocs.filter((x) => x.id !== item.id)];
 }
 
-// Opens the form to add a document. With replaceId it opens the same form for an existing record.
 window.openDocumentForm = ({ riderId = "", replaceId = "" } = {}) => {
   const existing = replaceId ? adminDocs.find((x) => x.id === replaceId) : null;
   if (replaceId && !existing) return toast("This document is no longer in the list. Refresh the page and try again.");
@@ -1355,7 +1472,6 @@ function wireDocumentForm(existing) {
     selfieUrl = "";
   };
 
-  // Rider picker (add mode only)
   if (!existing) {
     const input = $("#docRiderSearch");
     const list = $("#docRiderList");
@@ -1423,7 +1539,6 @@ function wireDocumentForm(existing) {
     });
   }
 
-  // Document file: validated as soon as it is chosen; an unsuitable file is cleared.
   $("#dFile").addEventListener("change", (e) => {
     const f = e.target.files[0];
     const problem = docFileProblem(f, DOC_FILE_EXT, "document", "JPG, JPEG, PNG, WEBP or PDF");
@@ -1435,7 +1550,6 @@ function wireDocumentForm(existing) {
     $("#dFileName").textContent = f ? f.name : existing ? `Current: ${existing.name}` : "No file chosen";
     err("");
   });
-  // Selfie: validated and previewed when chosen.
   $("#dSelfie").addEventListener("change", (e) => {
     const f = e.target.files[0];
     const problem = docFileProblem(f, SELFIE_FILE_EXT, "Rider Selfie / Screenshot", "JPG, JPEG, PNG or WEBP");
@@ -1466,7 +1580,7 @@ function wireDocumentForm(existing) {
 
   form.onsubmit = async (e) => {
     e.preventDefault();
-    if (busy) return; // a second click while the first upload is running is ignored
+    if (busy) return;
     const type = $("#dType").value;
     const docFile = $("#dFile").files[0];
     const selfieFile = $("#dSelfie").files[0];
@@ -1521,7 +1635,6 @@ function wireDocumentForm(existing) {
   };
 }
 
-// Opens a stored file (document or selfie) for the signed-in admin.
 window.uploadRiderDoc = (id) => openDocumentForm({ riderId: id });
 window.viewDoc = async (id, kind = "document") => {
   const d = adminDocs.find((x) => x.id === id);
@@ -1629,8 +1742,7 @@ function weeklyPaymentSummary() {
   db.payments.forEach((p) => {
     const iso = p.isoDate || excelDate(p.date) || "";
     const ws = isoWeekStart(iso) || String(p.week || "").slice(0, 10);
-    if (!ws) return;
-    if (!p.riderId) return;
+    if (!ws || !p.riderId) return;
     const key = String(p.riderId).toLowerCase() + "|" + ws;
     if (!map.has(key))
       map.set(key, {
@@ -1685,35 +1797,6 @@ function weeklyPaymentSummary() {
         String(b.weekStart).localeCompare(String(a.weekStart)) ||
         String(a.rider).localeCompare(String(b.rider)),
     );
-}
-function payments() {
-  if (currentUser.role !== "admin")
-    return (
-      layout("Payments", "Payment details are restricted to admin access.") +
-      `<div class="card"><div class="empty">Only administrators can view rider payment details.</div></div>`
-    );
-  const weekly = weeklyPaymentSummary();
-  return (
-    layout(
-      "Payments",
-      "Import the latest Excel every day to update Daily Work and rider payments automatically.",
-      `<label class="primary file-picker payment-import-btn"><input type="file" id="paymentExcelImport" accept=".xlsx,.xls" hidden>📥 Import Excel</label><button class="ghost" id="addPayment">+ Manual Adjustment</button>`,
-    ) +
-    `<div class="cards">${stat("PAYMENT RECORDS", db.payments.length)}${stat("WEEKLY RECORDS", weekly.length)}${stat("PENDING", weekly.filter((p) => p.status === "Pending").length)}${stat("COMPLETED", weekly.filter((p) => p.status === "Completed" || p.status === "Paid").length)}</div> 
- <div class="card"><div class="section-head"><div><h3>Daily Payment Records</h3><p class="muted">Day-by-day payout records imported from the Excel settlement sheet.</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>Rider</th><th>Week</th><th>LM</th><th>Primary</th><th>Club</th><th>Amount</th><th>Status</th><th>Source</th></tr></thead><tbody>${
-   db.payments
-     .slice()
-     .sort((a, b) =>
-       String(b.isoDate || b.date).localeCompare(String(a.isoDate || a.date)),
-     )
-     .map(
-       (p) =>
-         `<tr><td>${esc(p.date)}</td><td>${esc(p.rider)}</td><td>${esc(p.week || "")}</td><td>${Number(p.lm || 0)}</td><td>${Number(p.primary || 0)}</td><td>${Number(p.club || 0)}</td><td>₹${Number(p.amount || 0).toFixed(2)}</td><td><span class="badge ${p.status === "Pending" ? "warning" : "success"}">${esc(p.status)}</span> <button class="btn-sm" onclick="editPaymentStatus('${esc(p.id || "")}')">Edit</button></td><td>${yesNoIcon(p.source || "Manual")}</td></tr>`,
-     )
-     .join("") ||
-   '<tr><td colspan="9" class="empty">No payments recorded.</td></tr>'
- }</tbody></table></div></div>`
-  );
 }
 window.editWeeklyPaymentStatus = function (riderId, weekStart) {
   const rec = db.weeklyPayments.find(
@@ -1877,42 +1960,6 @@ window.updateRiderWeekDay = function (riderId, weekStart, isoDate, index) {
   openRiderWeekDetails(riderId, weekStart);
   toast("Week day updated");
 };
-function bindPayments() {
-  $("#addPayment")?.addEventListener("click", () => {
-    if (!db.riders.length) return toast("Add a rider first");
-    openModal(
-      `<h3>Manual Payment Adjustment</h3><form id="payForm" class="form-grid"><div class="field"><label>Rider</label><select id="pRider">${db.riders.map((r) => `<option>${esc(r.name)}</option>`).join("")}</select></div><div class="field"><label>Week</label><input id="pWeek" type="week" required></div><div class="field"><label>Amount</label><input id="pAmount" type="number" required min="0"></div><div class="field"><label>Status</label><select id="pStatus"><option>Paid</option><option>Pending</option></select></div><div class="modal-actions span2"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button class="primary">Save</button></div></form>`,
-    );
-    $("#payForm").onsubmit = (e) => {
-      e.preventDefault();
-      const rider = db.riders.find((r) => r.name === $("#pRider").value);
-      const week = $("#pWeek").value;
-      const iso = week ? week + "-1" : new Date().toISOString().slice(0, 10);
-      db.payments.push({
-        id: uid("PAY"),
-        date: displayDate(iso),
-        isoDate: iso,
-        rider: $("#pRider").value,
-        riderId: rider?.id || "",
-        week: isoWeekStart(iso),
-        amount: Number($("#pAmount").value),
-        status: $("#pStatus").value,
-        lm: 0,
-        primary: 0,
-        club: 0,
-        source: "Manual Adjustment",
-      });
-      save();
-      closeModal();
-      render("payments");
-    };
-  });
-  $("#paymentExcelImport")?.addEventListener("change", async (e) => {
-    const file = e.target.files?.[0];
-    if (file) await importPaymentsExcel(file);
-    e.target.value = "";
-  });
-}
 function yesNoIcon(value) {
   const v = String(value ?? "")
     .trim()
@@ -2001,7 +2048,6 @@ function riderForExcel(id, name, hub) {
       name: priorMap.mappedRiderName || priorMap.name,
       provisional: false,
     };
-  // An Excel ID is accepted as a permanent local rider ID only when its name also agrees.
   let r = excelId
     ? db.riders.find(
         (x) =>
@@ -2019,7 +2065,6 @@ function riderForExcel(id, name, hub) {
     if (matches.length === 1) r = matches[0];
   }
   if (!r) {
-    // This is an internal provisional key, not a generated Rider ID and not an approved registration.
     const seed = excelId.toUpperCase() + "|" + normalized || "unknown";
     let hash = 2166136261;
     for (let i = 0; i < seed.length; i++) {
@@ -2049,177 +2094,290 @@ function riderForExcel(id, name, hub) {
   } else if (hub && !r.hub) r.hub = hub;
   return r;
 }
-function upsertDailyPayment(rec) {
-  const key = (rec.riderId || normText(rec.rider)) + "|" + rec.date;
-  let p = db.payments.find(
-    (x) =>
-      x.importKey === key ||
-      (x.riderId &&
-        rec.riderId &&
-        x.riderId === rec.riderId &&
-        x.date === rec.date),
-  );
-  if (!p) {
-    p = { id: uid("PAY"), importKey: key };
-    db.payments.push(p);
-  }
-  Object.assign(p, rec);
-  return p;
-}
-// Daily records, Daily Work and partner sharing for sheets that have one row (or column) per day. The weekly table is NOT
-// written here any more: its amounts come from importPaymentsExcel below, straight from the sheet's amount column.
 async function legacyDailyImport(file, buf) {
-  {
-    const wb = XLSX.read(buf, { type: "array", cellDates: true });
-    const norm = (h) =>
-      String(h ?? "")
-        .trim()
-        .toLowerCase()
-        .replace(/[₹()]/g, "")
-        .replace(/[^a-z0-9]+/g, " ")
-        .trim();
-    const aliases = {
-      id: [
-        "payment id",
-        "transaction id",
-        "invoice number",
-        "invoice no",
-        "order id",
-        "reference id",
-        "transaction reference",
-      ],
-      riderId: ["rider id", "rider_id"],
-      name: ["rider name", "rider_name", "name"],
-      date: ["order date", "order_date", "date"],
-      lm: ["total lm orders", "total lm order", "lm orders", "lm"],
-      primary: [
-        "total primary orders",
-        "total primary order",
-        "total primary",
-        "primary orders",
-        "primary",
-      ],
-      club: [
-        "total club orders",
-        "total club order",
-        "total club",
-        "club orders",
-        "club",
-      ],
-      rate: ["rate applicable", "rate"],
-      amount: ["payout amount", "payout amount inr", "payout"],
-    };
-    const val = (row, names) => {
-      const wanted = names.map(norm);
-      const k = Object.keys(row).find((k) => wanted.includes(norm(k)));
-      return k === undefined ? "" : row[k];
-    };
-    const money = (v) => {
-      if (v === null || v === undefined || String(v).trim() === "") return null;
-      const n = Number(
-        String(v)
-          .replace(/,/g, "")
-          .replace(/[₹$]/g, "")
-          .replace(/[^\d.-]/g, ""),
-      );
-      return Number.isFinite(n) && n >= 0 ? n : null;
-    };
-    const required = ["name", "date", "lm", "primary", "club"];
-    let inserted = 0,
-      updated = 0,
-      invalid = 0,
-      workAdded = 0,
-      weeklyUpdated = 0,
-      completedAmount = 0,
-      processed = 0;
-    const shareRecords = []; // sent to the server afterwards so matching vendors / franchises get their riders' data
-    const dailyName = wb.SheetNames.find(
-      (n) => norm(n) === "all riders daily settlement",
+  const wb = XLSX.read(buf, { type: "array", cellDates: true });
+  const norm = (h) =>
+    String(h ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[₹()]/g, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  const aliases = {
+    id: [
+      "payment id",
+      "transaction id",
+      "invoice number",
+      "invoice no",
+      "order id",
+      "reference id",
+      "transaction reference",
+    ],
+    riderId: ["rider id", "rider_id"],
+    name: ["rider name", "rider_name", "name"],
+    date: ["order date", "order_date", "date"],
+    lm: ["total lm orders", "total lm order", "lm orders", "lm"],
+    primary: [
+      "total primary orders",
+      "total primary order",
+      "total primary",
+      "primary orders",
+      "primary",
+    ],
+    club: [
+      "total club orders",
+      "total club order",
+      "total club",
+      "club orders",
+      "club",
+    ],
+    rate: ["rate applicable", "rate"],
+    amount: ["payout amount", "payout amount inr", "payout"],
+  };
+  const val = (row, names) => {
+    const wanted = names.map(norm);
+    const k = Object.keys(row).find((k) => wanted.includes(norm(k)));
+    return k === undefined ? "" : row[k];
+  };
+  const money = (v) => {
+    if (v === null || v === undefined || String(v).trim() === "") return null;
+    const n = Number(
+      String(v)
+        .replace(/,/g, "")
+        .replace(/[₹$]/g, "")
+        .replace(/[^\d.-]/g, ""),
     );
-    if (dailyName) {
-      const raw = XLSX.utils.sheet_to_json(wb.Sheets[dailyName], {
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  const required = ["name", "date", "lm", "primary", "club"];
+  let inserted = 0,
+    updated = 0,
+    invalid = 0,
+    workAdded = 0,
+    weeklyUpdated = 0,
+    completedAmount = 0,
+    processed = 0;
+  const shareRecords = [];
+  const dailyName = wb.SheetNames.find(
+    (n) => norm(n) === "all riders daily settlement",
+  );
+  if (dailyName) {
+    const raw = XLSX.utils.sheet_to_json(wb.Sheets[dailyName], {
+      defval: "",
+      raw: true,
+    });
+    if (!raw.length)
+      throw new Error("The All Riders Daily Settlement sheet is empty.");
+    const headers = Object.keys(raw[0]);
+    const missing = required.filter(
+      (k) => !headers.some((h) => aliases[k].map(norm).includes(norm(h))),
+    );
+    if (missing.length)
+      throw new Error("Missing required columns: " + missing.join(", "));
+    const batch = [];
+    const seen = new Set();
+    for (let i = 0; i < raw.length; i++) {
+      const row = raw[i],
+        name = String(val(row, aliases.name)).trim(),
+        riderId = String(val(row, aliases.riderId)).trim(),
+        date = excelDate(val(row, aliases.date));
+      const lm = money(val(row, aliases.lm)),
+        primary = money(val(row, aliases.primary)),
+        club = money(val(row, aliases.club));
+      const rate = parseRate(val(row, aliases.rate));
+      let amount = money(val(row, aliases.amount));
+      if (
+        !name ||
+        !date ||
+        lm === null ||
+        primary === null ||
+        club === null ||
+        primary + club !== lm
+      ) {
+        invalid++;
+        continue;
+      }
+      if (amount === null)
+        amount =
+          Math.round((primary * rate.primary + club * rate.club) * 100) / 100;
+      const rider = riderForExcel(riderId, name, val(row, ["Hub", "hub"]));
+      const key = (rider.id || normText(name)) + "|" + date;
+      if (seen.has(key)) {
+        invalid++;
+        continue;
+      }
+      seen.add(key);
+      batch.push({
+        rider,
+        date,
+        lm,
+        primary,
+        club,
+        amount,
+        rate: val(row, aliases.rate),
+        source: file.name,
+        key,
+        excelRiderId: riderId,
+        excelName: name,
+      });
+    }
+    for (const rec of batch) {
+      const old = db.payments.find(
+        (p) =>
+          p.importKey === rec.key ||
+          (p.riderId === rec.rider.id &&
+            String(p.isoDate || excelDate(p.date)) === rec.date),
+      );
+      const pay = {
+        id: old?.id || uid("PAY"),
+        importKey: rec.key,
+        riderId: rec.rider.id,
+        rider: rec.rider.name,
+        date: displayDate(rec.date),
+        isoDate: rec.date,
+        week: isoWeekStart(rec.date),
+        lm: rec.lm,
+        primary: rec.primary,
+        club: rec.club,
+        amount: rec.amount,
+        status: rec.amount > 0 ? "Completed" : "Pending",
+        source: file.name,
+        rate: rec.rate,
+        updatedAt: new Date().toISOString(),
+      };
+      if (old) {
+        Object.assign(old, pay);
+        updated++;
+      } else {
+        db.payments.push(pay);
+        inserted++;
+      }
+      shareRecords.push({
+        riderId: rec.excelRiderId,
+        adminRiderId: rec.rider.id,
+        name: rec.excelName || rec.rider.name,
+        date: rec.date,
+        lm: rec.lm,
+        primary: rec.primary,
+        club: rec.club,
+        amount: rec.amount,
+      });
+      const wk = rec.rider.id + "|" + rec.date,
+        ow = db.work.find((w) => w.excelKey === wk);
+      const work = {
+        id: ow?.id || uid("WRK"),
+        excelKey: wk,
+        date: displayDate(rec.date),
+        rider: rec.rider.name,
+        riderId: rec.rider.id,
+        orders: rec.lm,
+        type: "Excel Daily Settlement",
+        notes: `LM ${rec.lm} / Primary ${rec.primary} / Club ${rec.club}`,
+        lm: rec.lm,
+        primary: rec.primary,
+        club: rec.club,
+        source: file.name,
+        updatedAt: new Date().toISOString(),
+      };
+      if (ow) Object.assign(ow, work);
+      else {
+        db.work.push(work);
+        workAdded++;
+      }
+      processed++;
+    }
+  } else {
+    let wideName =
+      wb.SheetNames.find((n) => norm(n) === "weekly summary") ||
+      wb.SheetNames.find((n) => /summary|settlement|payment/i.test(n));
+    let matrix = [],
+      hr = -1;
+    const looksLikeWideSheet = (sheetName) => {
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
+        header: 1,
         defval: "",
         raw: true,
       });
-      if (!raw.length)
-        throw new Error("The All Riders Daily Settlement sheet is empty.");
-      const headers = Object.keys(raw[0]);
-      const missing = required.filter(
-        (k) => !headers.some((h) => aliases[k].map(norm).includes(norm(h))),
+      for (let i = 0; i < Math.min(rows.length, 30); i++) {
+        const cells = rows[i] || [];
+        const hasName = cells.some((v) =>
+          ["name", "rider name", "rider_name"].includes(norm(v)),
+        );
+        const hasDates = cells.some((v) => !!excelDate(v));
+        if (hasName && hasDates) return { rows, headerRow: i };
+      }
+      return null;
+    };
+    let detected = wideName ? looksLikeWideSheet(wideName) : null;
+    if (!detected) {
+      for (const sheetName of wb.SheetNames) {
+        const candidate = looksLikeWideSheet(sheetName);
+        if (candidate) {
+          wideName = sheetName;
+          detected = candidate;
+          break;
+        }
+      }
+    }
+    if (!detected)
+      throw new Error(
+        "Could not detect a payment sheet. Add a header row with Rider Name/NAME and dated order columns, or use the All Riders Daily Settlement columns.",
       );
-      if (missing.length)
-        throw new Error("Missing required columns: " + missing.join(", "));
-      const batch = [];
-      const seen = new Set();
-      for (let i = 0; i < raw.length; i++) {
-        const row = raw[i],
-          name = String(val(row, aliases.name)).trim(),
-          riderId = String(val(row, aliases.riderId)).trim(),
-          date = excelDate(val(row, aliases.date));
-        const lm = money(val(row, aliases.lm)),
-          primary = money(val(row, aliases.primary)),
-          club = money(val(row, aliases.club));
-        const rate = parseRate(val(row, aliases.rate));
-        let amount = money(val(row, aliases.amount));
+    matrix = detected.rows;
+    hr = detected.headerRow;
+    const headers = matrix[hr].map((v) => String(v ?? "").trim()),
+      ni = headers.findIndex((v) =>
+        ["name", "rider name", "rider_name"].includes(norm(v)),
+      ),
+      dates = headers
+        .map((h, i) => ({ i, date: excelDate(h) }))
+        .filter((x) => x.date);
+    if (!dates.length)
+      throw new Error("No valid date columns found in the Excel sheet.");
+    for (let ri = hr + 1; ri < matrix.length; ri++) {
+      const row = matrix[ri],
+        name = String(row[ni] ?? "").trim();
+      if (!name || /^(total|s no|s\.no)/i.test(name)) continue;
+      const rider = riderForExcel("", name, ""),
+        weekStart = isoWeekStart(dates.map((x) => x.date).sort()[0]);
+      for (const dc of dates) {
+        const cell = String(row[dc.i] ?? "").trim();
+        if (!cell) continue;
+        const pair = parseOrderPair(cell);
         if (
-          !name ||
-          !date ||
-          lm === null ||
-          primary === null ||
-          club === null ||
-          primary + club !== lm
+          !Number.isFinite(pair.lm) ||
+          pair.lm < 0 ||
+          pair.primary < 0 ||
+          pair.club < 0 ||
+          Math.abs(pair.lm - pair.primary - pair.club) > 0.001
         ) {
           invalid++;
           continue;
         }
-        if (amount === null)
-          amount =
-            Math.round((primary * rate.primary + club * rate.club) * 100) / 100;
-        const rider = riderForExcel(riderId, name, val(row, ["Hub", "hub"]));
-        const key = (rider.id || normText(name)) + "|" + date;
-        if (seen.has(key)) {
-          invalid++;
-          continue;
-        }
-        seen.add(key);
-        batch.push({
-          rider,
-          date,
-          lm,
-          primary,
-          club,
-          amount,
-          rate: val(row, aliases.rate),
-          source: file.name,
-          key,
-          excelRiderId: riderId,
-          excelName: name,
-        });
-      }
-      for (const rec of batch) {
-        const old = db.payments.find(
-          (p) =>
-            p.importKey === rec.key ||
-            (p.riderId === rec.rider.id &&
-              String(p.isoDate || excelDate(p.date)) === rec.date),
-        );
-        const pay = {
-          id: old?.id || uid("PAY"),
-          importKey: rec.key,
-          riderId: rec.rider.id,
-          rider: rec.rider.name,
-          date: displayDate(rec.date),
-          isoDate: rec.date,
-          week: isoWeekStart(rec.date),
-          lm: rec.lm,
-          primary: rec.primary,
-          club: rec.club,
-          amount: rec.amount,
-          status: rec.amount > 0 ? "Completed" : "Pending",
-          source: file.name,
-          rate: rec.rate,
-          updatedAt: new Date().toISOString(),
-        };
+        if (pair.lm === 0 && pair.primary === 0 && pair.club === 0) continue;
+        const key = rider.id + "|" + dc.date,
+          old = db.payments.find(
+            (p) =>
+              p.importKey === key ||
+              (p.riderId === rider.id &&
+                String(p.isoDate || excelDate(p.date)) === dc.date),
+          ),
+          pay = {
+            id: old?.id || uid("PAY"),
+            importKey: key,
+            riderId: rider.id,
+            rider: rider.name,
+            date: displayDate(dc.date),
+            isoDate: dc.date,
+            week: weekStart,
+            lm: pair.lm,
+            primary: pair.primary,
+            club: pair.club,
+            amount: Number(old?.amount || 0),
+            status: old?.status || "Pending",
+            source: file.name,
+            updatedAt: new Date().toISOString(),
+          };
         if (old) {
           Object.assign(old, pay);
           updated++;
@@ -2228,32 +2386,30 @@ async function legacyDailyImport(file, buf) {
           inserted++;
         }
         shareRecords.push({
-          riderId: rec.excelRiderId,
-          adminRiderId: rec.rider.id,
-          name: rec.excelName || rec.rider.name,
-          date: rec.date,
-          lm: rec.lm,
-          primary: rec.primary,
-          club: rec.club,
-          amount: rec.amount,
+          riderId: "",
+          adminRiderId: rider.id,
+          name,
+          date: dc.date,
+          lm: pair.lm,
+          primary: pair.primary,
+          club: pair.club,
+          amount: pay.amount,
         });
-        const wk = rec.rider.id + "|" + rec.date,
-          ow = db.work.find((w) => w.excelKey === wk);
-        const work = {
-          id: ow?.id || uid("WRK"),
-          excelKey: wk,
-          date: displayDate(rec.date),
-          rider: rec.rider.name,
-          riderId: rec.rider.id,
-          orders: rec.lm,
-          type: "Excel Daily Settlement",
-          notes: `LM ${rec.lm} / Primary ${rec.primary} / Club ${rec.club}`,
-          lm: rec.lm,
-          primary: rec.primary,
-          club: rec.club,
-          source: file.name,
-          updatedAt: new Date().toISOString(),
-        };
+        const ow = db.work.find((w) => w.excelKey === key),
+          work = {
+            id: ow?.id || uid("WRK"),
+            excelKey: key,
+            date: displayDate(dc.date),
+            rider: rider.name,
+            riderId: rider.id,
+            orders: pair.lm,
+            type: "Excel Daily Settlement",
+            notes: `LM ${pair.lm} / Primary ${pair.primary} / Club ${pair.club}`,
+            lm: pair.lm,
+            primary: pair.primary,
+            club: pair.club,
+            source: file.name,
+          };
         if (ow) Object.assign(ow, work);
         else {
           db.work.push(work);
@@ -2261,185 +2417,35 @@ async function legacyDailyImport(file, buf) {
         }
         processed++;
       }
-    } else {
-      // Wide-format Weekly Summary: validate NAME plus at least one date column.
-      // Find a wide-format payment sheet by its contents, not only by its tab name.
-      // Many customer workbooks use Sheet1, Payments, or a custom tab name.
-      let wideName =
-        wb.SheetNames.find((n) => norm(n) === "weekly summary") ||
-        wb.SheetNames.find((n) => /summary|settlement|payment/i.test(n));
-      let matrix = [],
-        hr = -1;
-      const looksLikeWideSheet = (sheetName) => {
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
-          header: 1,
-          defval: "",
-          raw: true,
-        });
-        for (let i = 0; i < Math.min(rows.length, 30); i++) {
-          const cells = rows[i] || [];
-          const hasName = cells.some((v) =>
-            ["name", "rider name", "rider_name"].includes(norm(v)),
-          );
-          const hasDates = cells.some((v) => !!excelDate(v));
-          if (hasName && hasDates) return { rows, headerRow: i };
-        }
-        return null;
-      };
-      let detected = wideName ? looksLikeWideSheet(wideName) : null;
-      if (!detected) {
-        for (const sheetName of wb.SheetNames) {
-          const candidate = looksLikeWideSheet(sheetName);
-          if (candidate) {
-            wideName = sheetName;
-            detected = candidate;
-            break;
-          }
-        }
-      }
-      if (!detected)
-        throw new Error(
-          "Could not detect a payment sheet. Add a header row with Rider Name/NAME and dated order columns, or use the All Riders Daily Settlement columns.",
-        );
-      matrix = detected.rows;
-      hr = detected.headerRow;
-      if (hr < 0)
-        throw new Error(
-          "Required columns missing: NAME and dated order columns.",
-        );
-      const headers = matrix[hr].map((v) => String(v ?? "").trim()),
-        ni = headers.findIndex((v) =>
-          ["name", "rider name", "rider_name"].includes(norm(v)),
-        ),
-        dates = headers
-          .map((h, i) => ({ i, date: excelDate(h) }))
-          .filter((x) => x.date);
-      if (!dates.length)
-        throw new Error("No valid date columns found in the Excel sheet.");
-      const paymentCol = headers.findIndex((v) =>
-        norm(v).includes("payment completed"),
-      );
-      for (let ri = hr + 1; ri < matrix.length; ri++) {
-        const row = matrix[ri],
-          name = String(row[ni] ?? "").trim();
-        if (!name || /^(total|s no|s\.no)/i.test(name)) continue;
-        const rider = riderForExcel("", name, ""),
-          weekStart = isoWeekStart(dates.map((x) => x.date).sort()[0]);
-        let lmSum = 0,
-          pSum = 0,
-          cSum = 0,
-          days = 0;
-        for (const dc of dates) {
-          const cell = String(row[dc.i] ?? "").trim();
-          if (!cell) continue;
-          const pair = parseOrderPair(cell);
-          if (
-            !Number.isFinite(pair.lm) ||
-            pair.lm < 0 ||
-            pair.primary < 0 ||
-            pair.club < 0 ||
-            Math.abs(pair.lm - pair.primary - pair.club) > 0.001
-          ) {
-            invalid++;
-            continue;
-          }
-          if (pair.lm === 0 && pair.primary === 0 && pair.club === 0) continue;
-          const key = rider.id + "|" + dc.date,
-            old = db.payments.find(
-              (p) =>
-                p.importKey === key ||
-                (p.riderId === rider.id &&
-                  String(p.isoDate || excelDate(p.date)) === dc.date),
-            ),
-            pay = {
-              id: old?.id || uid("PAY"),
-              importKey: key,
-              riderId: rider.id,
-              rider: rider.name,
-              date: displayDate(dc.date),
-              isoDate: dc.date,
-              week: weekStart,
-              lm: pair.lm,
-              primary: pair.primary,
-              club: pair.club,
-              amount: Number(old?.amount || 0),
-              status: old?.status || "Pending",
-              source: file.name,
-              updatedAt: new Date().toISOString(),
-            };
-          if (old) {
-            Object.assign(old, pay);
-            updated++;
-          } else {
-            db.payments.push(pay);
-            inserted++;
-          }
-          shareRecords.push({
-            riderId: "",
-            adminRiderId: rider.id,
-            name,
-            date: dc.date,
-            lm: pair.lm,
-            primary: pair.primary,
-            club: pair.club,
-            amount: pay.amount,
-          });
-          const ow = db.work.find((w) => w.excelKey === key),
-            work = {
-              id: ow?.id || uid("WRK"),
-              excelKey: key,
-              date: displayDate(dc.date),
-              rider: rider.name,
-              riderId: rider.id,
-              orders: pair.lm,
-              type: "Excel Daily Settlement",
-              notes: `LM ${pair.lm} / Primary ${pair.primary} / Club ${pair.club}`,
-              lm: pair.lm,
-              primary: pair.primary,
-              club: pair.club,
-              source: file.name,
-            };
-          if (ow) Object.assign(ow, work);
-          else {
-            db.work.push(work);
-            workAdded++;
-          }
-          lmSum += pair.lm;
-          pSum += pair.primary;
-          cSum += pair.club;
-          days++;
-          processed++;
-        }
-      }
     }
-    if (!processed)
-      throw new Error(
-        "No valid payment rows were found. Check required columns and row data.",
-      );
-    const now = new Date().toLocaleString("en-IN");
-    db.excelSync = {
-      lastSync: now,
-      fileName: file.name,
-      rows: processed,
-      records: processed,
-      history: [
-        ...(db.excelSync?.history || []),
-        {
-          time: now,
-          fileName: file.name,
-          records: processed,
-          inserted,
-          updated,
-          invalid,
-          workAdded,
-          weeklyUpdated,
-          completedAmount,
-        },
-      ].slice(-20),
-    };
-    save();
-    await sharePaymentImport(file.name, shareRecords, await fileSha256(buf));
   }
+  if (!processed)
+    throw new Error(
+      "No valid payment rows were found. Check required columns and row data.",
+    );
+  const now = new Date().toLocaleString("en-IN");
+  db.excelSync = {
+    lastSync: now,
+    fileName: file.name,
+    rows: processed,
+    records: processed,
+    history: [
+      ...(db.excelSync?.history || []),
+      {
+        time: now,
+        fileName: file.name,
+        records: processed,
+        inserted,
+        updated,
+        invalid,
+        workAdded,
+        weeklyUpdated,
+        completedAmount,
+      },
+    ].slice(-20),
+  };
+  save();
+  await sharePaymentImport(file.name, shareRecords, await fileSha256(buf));
 }
 async function fileSha256(buf) {
   try {
@@ -2451,7 +2457,6 @@ async function fileSha256(buf) {
     return "";
   }
 }
-// Excel -> server database -> Weekly Payments table.
 async function importPaymentsExcel(file) {
   const ext = (
     String(file?.name || "")
@@ -2473,14 +2478,11 @@ async function importPaymentsExcel(file) {
     layout = "";
   try {
     const buf = await file.arrayBuffer();
-    // no cellDates: dates arrive as exact Excel serial numbers, so a time zone can never move a date by a day
     parsed = PaymentExcel.parseSheets(
       PaymentExcel.sheetsFromWorkbook(XLSX, XLSX.read(buf, { type: "array" })),
     );
     if (!parsed.ok) throw new Error(parsed.error);
     layout = parsed.layout;
-    // Rider IDs are verified by the server against the Rider Registration database. The browser sends each row as the
-    // sheet has it (Rider ID and name); it never invents or guesses an ID.
     const blankIds = parsed.records.filter(
       (r) => !String(r.riderId || "").trim(),
     ).length;
@@ -2526,7 +2528,6 @@ async function importPaymentsExcel(file) {
       weeks: result.weeks,
     };
     weeklyStore.newImportId = result.alreadyImported ? "" : result.importId;
-    // the rider list shows the latest weekly payment of each rider
     const latest = new Map();
     parsed.records.forEach((r) => {
       if (r.amount === null) return;
@@ -2544,7 +2545,6 @@ async function importPaymentsExcel(file) {
       if (rd) rd.weekly = Number(r.amount);
     });
     save();
-    // sheets with one row (or column) per day also fill the daily records, Daily Work and the partner portals, as before
     if (parsed.layout !== "weekly") {
       try {
         await legacyDailyImport(file, buf);
@@ -2586,7 +2586,6 @@ async function importPaymentsExcel(file) {
   const rejected = (weeklyStore.lastReport?.skipped || []).filter(
     (x) => !x.duplicate && !x.conflict,
   ).length;
-  // Verified rows only: rows still waiting for Rider Verification are reported on their own below.
   const savedCount =
     (result.importedFromFile || 0) + (result.importedFromPending || 0);
   toast(
@@ -2705,7 +2704,6 @@ function client() {
  <div class="table-wrap"><table class="table reg-table"><thead><tr><th>Rider ID</th><th>Rider Name</th><th>Mobile Number</th><th>Hub Pincode</th><th>Hub Location</th><th>Selfie</th><th>Aadhaar</th><th>Applied By</th><th>Application Date</th><th>Status</th><th>Action</th></tr></thead><tbody id="regRows"></tbody></table></div>
  <p id="regEmpty" class="empty hidden"></p></div>`;
 }
-// ---------- Franchise Applications / Vendor Registrations: Excel export ----------
 const PARTNER_EXPORT_COLUMNS = {
   Franchise: [
     ["Application ID", (p) => p.appId],
@@ -2755,7 +2753,6 @@ function activeClientType() {
     ? "Vendor"
     : "Franchise";
 }
-// Text starting with = + - @ is written as text, so a spreadsheet never runs it as a formula.
 const safeCell = (v) => {
   const t = String(v ?? "");
   return /^[=+\-@]/.test(t) ? "'" + t : t;
@@ -2787,7 +2784,6 @@ function exportPartnerRows(type) {
     `Exported ${rows.length} ${type === "Vendor" ? "vendor registration" : "franchise application"}${rows.length === 1 ? "" : "s"}`,
   );
 }
-// ---------- Ban / unban a vendor or franchise login (the application status does not change) ----------
 function banUntilText(ban) {
   return ban && ban.until
     ? "until " +
@@ -2862,7 +2858,6 @@ window.unbanPartner = async (id) => {
     toast(err.message);
   }
 };
-// ---------- Riders under each Vendor / Franchise (partner-riders.js does the matching) ----------
 function partnerRiderGroups(list) {
   if (!window.PartnerRiders) return [];
   return PartnerRiders.ridersByPartner(
@@ -2898,7 +2893,6 @@ function partnerRidersGroupHtml(g) {
     .join("");
   return `<div class="pr-group">${head}<div class="table-wrap"><table class="table"><thead><tr><th>S.No</th><th>Rider ID</th><th>Rider Name</th><th>Mobile</th><th>Hub</th><th>Status</th><th>Registered</th><th>Payment Weeks</th><th>Orders</th><th>Amount</th><th>Details</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
 }
-// While a search is typed, the riders of every matching vendor / franchise are listed under the tables.
 function paintPartnerRiders(list, term) {
   const card = $("#partnerRidersCard");
   if (!card) return;
@@ -3103,7 +3097,6 @@ function bindClient() {
     paintPartnerRiders([...vendorList, ...franchiseList], term);
   };
   if (q) q.oninput = apply;
-  // Rider counts and payment figures need the registrations and the weekly payments.
   if (
     !weeklyStore.loading &&
     (!weeklyStore.loadedAt || Date.now() - weeklyStore.loadedAt > 10000)
@@ -3225,7 +3218,6 @@ function fmtDate(v) {
   const d = new Date(v);
   return isNaN(d) ? String(v || "") : d.toLocaleString();
 }
-// Ask to confirm, with an optional note (e.g. reason for rejection), then save on the server.
 window.decidePartner = (id, decision) => {
   const p = (db.partners || []).find((x) => x.id === id);
   if (!p) return;
@@ -3270,7 +3262,6 @@ window.decidePartner = (id, decision) => {
           if (!app[k]) delete p[k];
         });
       } else {
-        // Record that only exists in this browser.
         if (undo) {
           p.status = "Under Review";
           delete p.decidedBy;
@@ -3318,14 +3309,12 @@ window.decidePartner = (id, decision) => {
     }
   };
 };
-// ---------- Partner portal logins ----------
 function waNumber(v) {
   let d = String(v || "").replace(/\D/g, "");
   if (d.length === 11 && d.startsWith("0")) d = d.slice(1);
   if (d.length === 10) d = "91" + d;
   return d.length >= 11 && d.length <= 15 ? d : "";
 }
-// Shown once, right after a login is created or its password is reset.
 function showCredentials(c, { title = "Portal login created" } = {}) {
   if (!c) return;
   const text = `Hello ${c.name},\nYour On The Way Logistics ${c.portal} login:\n${c.portalUrl}\nID: ${c.loginId}\nTemporary password: ${c.password}\nYou will be asked to choose your own password when you first sign in.`;
@@ -3407,7 +3396,6 @@ function setText(sel, v) {
   const el = $(sel);
   if (el) el.textContent = v;
 }
-// Refresh counts, tables and the sidebar badge without re-rendering the page (keeps tabs and search).
 function refreshPartnerViews() {
   const all = Array.isArray(db.partners) ? db.partners : [];
   const fr = all.filter((p) => p.type === "Franchise").length,
@@ -3467,7 +3455,6 @@ async function syncPartnerApplications() {
     if (!response.ok)
       throw new Error("Dashboard API responded " + response.status);
     const mapped = (await response.json()).map(mapServerPartner);
-    // Tell the admin about applications that arrived since the last check.
     const ids = new Set(mapped.map((p) => p.id));
     if (knownPartnerIds) {
       const arrived = mapped.filter((p) => !knownPartnerIds.has(p.id));
@@ -3479,7 +3466,6 @@ async function syncPartnerApplications() {
         toast(`${arrived.length} new applications received`);
     }
     knownPartnerIds = ids;
-    // Keep records that only exist in this browser (created before the server was used).
     const localOnly = (db.partners || []).filter(
       (p) => !p.serverSynced && !ids.has(p.id),
     );
@@ -3489,7 +3475,6 @@ async function syncPartnerApplications() {
     refreshPartnerViews();
   } catch (err) {
     console.warn("Could not sync partner applications from backend:", err);
-    // Warn once (not on every background check) while the admin is looking at applications.
     if (!partnerSyncFailed && ["client", "partners"].includes(currentPage))
       toast(
         "Could not reach the server - start the backend to load website applications",
@@ -3510,6 +3495,7 @@ function startPartnerPolling() {
     notifLoad({ quiet: true });
     rrLoad({ quiet: true });
     checkPasswordHelpRequests();
+    checkSupportTicketsAlert({ notifyOnIncrease: true });
   }, PARTNER_POLL_MS);
 }
 function stopPartnerPolling() {
@@ -3518,7 +3504,10 @@ function stopPartnerPolling() {
   partnerPollTimer = null;
 }
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && currentUser) syncPartnerApplications();
+  if (!document.hidden && currentUser) {
+    syncPartnerApplications();
+    checkSupportTicketsAlert({ notifyOnIncrease: true });
+  }
 });
 function bindPartners() {
   const b = $("#newPartner");
@@ -3579,7 +3568,7 @@ function partnerModal(p = null) {
   const appId =
     p?.appId || (editing ? "" : nextPartnerAppId(originalType)) || "";
   openModal(
-    `<h3>${editing ? "Edit" : "New"} Partner Application</h3><form id="partnerForm" class="form-grid"><div class="field"><label>Application ID</label><input id="paAppId" value="${esc(editing ? appId : "Assigned when saved")}" readonly></div><div class="field"><label>Partner Type</label><select id="paType"><option ${originalType === "Franchise" ? "selected" : ""}>Franchise</option><option ${originalType === "Vendor" ? "selected" : ""}>Vendor</option></select></div><div class="field"><label>Name / Company</label><input id="paName" required value="${esc(p?.name || "")}"></div><div class="field"><label>Contact Name</label><input id="paContact" value="${esc(p?.contact || "")}"></div><div class="field"><label>Mobile</label><input id="paMobile" value="${esc(p?.mobile || "")}"></div><div class="field"><label>WhatsApp</label><input id="paWhatsapp" value="${esc(p?.whatsapp || "")}"></div><div class="field"><label>Email</label><input id="paEmail" type="email" value="${esc(p?.email || "")}"></div><div class="field"><label>State</label><input id="paState" value="${esc(p?.state || "Andhra Pradesh")}"></div><div class="field"><label>District</label><input id="paDistrict" value="${esc(p?.district || "")}"></div><div class="field"><label>City / Town</label><input id="paCity" value="${esc(p?.city || "")}"></div><div class="field"><label>Street / Locality</label><input id="paStreet" value="${esc(p?.street || "")}"></div><div class=\"field\"><label>Location / Area Name</label><input id=\"paArea\" value=\"${esc(p?.locationArea || p?.locality || "")}\"></div><div class=\"field\"><label>Date of Birth</label><input id=\"paDob\" type=\"date\" value=\"${esc(p?.dateOfBirth || "")}\"></div><div class=\"field\"><label>Years of Experience</label><input id=\"paYears\" type=\"number\" min=\"0\" max=\"10\" step=\"1\" required value=\"${esc(p?.yearsOfExperience || "")}\"></div><div class="field"><label>Near Location / Landmark</label><input id="paNearby" value="${esc(p?.nearby || p?.landmark || "")}"></div><div class="field"><label>Pincode</label><input id="paPin" value="${esc(p?.pincode || "")}"></div><div class="field"><label>Educational Qualification</label><input id="paEdu" value="${esc(p?.education || "")}"></div><div class="field"><label>Status</label><select id="paStatus">${["New", "Contacted", "Under Review", "Documents Pending", "Accepted", "Rejected"].map((x) => `<option ${p?.status === x ? "selected" : ""}>${x}</option>`).join("")}</select></div><div class="field span2"><label>Address</label><textarea id="paAddress">${esc(p?.address || "")}</textarea></div><div class="field span2"><label>Services / Remarks</label><textarea id="paRemarks">${esc(p?.remarks || "")}</textarea></div><div class="modal-actions span2"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button class="primary">${editing ? "Update Application" : "Save Application"}</button></div></form>`,
+    `<h3>${editing ? "Edit" : "New"} Partner Application</h3><form id="partnerForm" class="form-grid"><div class="field"><label>Application ID</label><input id="paAppId" value="${esc(editing ? appId : "Assigned when saved")}" readonly></div><div class="field"><label>Partner Type</label><select id="paType"><option ${originalType === "Franchise" ? "selected" : ""}>Franchise</option><option ${originalType === "Vendor" ? "selected" : ""}>Vendor</option></select></div><div class="field"><label>Name / Company</label><input id="paName" required value="${esc(p?.name || "")}"></div><div class="field"><label>Contact Name</label><input id="paContact" value="${esc(p?.contact || "")}"></div><div class="field"><label>Mobile</label><input id="paMobile" value="${esc(p?.mobile || "")}"></div><div class="field"><label>WhatsApp</label><input id="paWhatsapp" value="${esc(p?.whatsapp || "")}"></div><div class="field"><label>Email</label><input id="paEmail" type="email" value="${esc(p?.email || "")}"></div><div class="field"><label>State</label><input id="paState" value="${esc(p?.state || "Andhra Pradesh")}"></div><div class="field"><label>District</label><input id="paDistrict" value="${esc(p?.district || "")}"></div><div class="field"><label>City / Town</label><input id="paCity" value="${esc(p?.city || "")}"></div><div class="field"><label>Street / Locality</label><input id="paStreet" value="${esc(p?.street || "")}"></div><div class="field"><label>Location / Area Name</label><input id="paArea" value="${esc(p?.locationArea || p?.locality || "")}"></div><div class="field"><label>Date of Birth</label><input id="paDob" type="date" value="${esc(p?.dateOfBirth || "")}"></div><div class="field"><label>Years of Experience</label><input id="paYears" type="number" min="0" max="10" step="1" required value="${esc(p?.yearsOfExperience || "")}"></div><div class="field"><label>Near Location / Landmark</label><input id="paNearby" value="${esc(p?.nearby || p?.landmark || "")}"></div><div class="field"><label>Pincode</label><input id="paPin" value="${esc(p?.pincode || "")}"></div><div class="field"><label>Educational Qualification</label><input id="paEdu" value="${esc(p?.education || "")}"></div><div class="field"><label>Status</label><select id="paStatus">${["New", "Contacted", "Under Review", "Documents Pending", "Accepted", "Rejected"].map((x) => `<option ${p?.status === x ? "selected" : ""}>${x}</option>`).join("")}</select></div><div class="field span2"><label>Address</label><textarea id="paAddress">${esc(p?.address || "")}</textarea></div><div class="field span2"><label>Services / Remarks</label><textarea id="paRemarks">${esc(p?.remarks || "")}</textarea></div><div class="modal-actions span2"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button class="primary">${editing ? "Update Application" : "Save Application"}</button></div></form>`,
   );
   const typeEl = $("#paType"),
     idEl = $("#paAppId");
@@ -3627,7 +3616,6 @@ function partnerModal(p = null) {
       : "client";
     const saveBtn = e.target.querySelector("button.primary");
     if (editing && !p.serverSynced) {
-      // Record that only exists in this browser: keep the old local behaviour.
       let newAppId = idEl.value;
       if (type !== originalType) newAppId = nextPartnerAppId(type, p.id);
       Object.assign(p, x, { appId: newAppId });
@@ -3638,7 +3626,6 @@ function partnerModal(p = null) {
       toast("Application updated successfully");
       return;
     }
-    // Save on the server so every admin sees the same record.
     if (saveBtn) {
       saveBtn.disabled = true;
       saveBtn.textContent = "Saving…";
@@ -3779,9 +3766,6 @@ function settings() {
     `<div class="grid2"><div class="card"><h3>Account</h3><p><b>${esc(currentUser.name)}</b></p><p>${esc(currentUser.email)}</p><form id="adminPwForm" class="pw-form"><h4>Change password</h4><label>Current password<input id="apCurrent" type="password" required autocomplete="current-password"></label><label>New password<input id="apNew" type="password" required minlength="8" autocomplete="new-password"></label><label>Confirm new password<input id="apConfirm" type="password" required minlength="8" autocomplete="new-password"></label><p class="hint">At least 8 characters, with letters and numbers. Other devices will be signed out.</p><p id="apMessage" class="form-message" role="status"></p><button class="primary">Change password</button></form></div><div class="card"><h3>Data</h3><p>Applications, rider registrations, hubs, weekly payments, reports and rider documents are saved on the server and are the same for every admin.</p><p class="hint">Daily Work entries, WhatsApp messages and manual payment adjustments are kept only in this browser. Resetting clears those from this browser; nothing on the server is changed.</p><button class="btn-sm danger" id="clearData">Reset this browser's data</button></div></div>${currentUser.isSuperAdmin ? adminAccountsCardHtml() : ""}`
   );
 }
-// ---------- Super Admin: Admin Accounts (Settings) ----------
-// Shown only to the Super Admin, and enforced again by the server. Passwords and hashes never reach the browser:
-// "Send reset link" emails a one-time link to the admin's registered address.
 const adminAcct = {
   admins: [],
   mailReady: true,
@@ -3851,7 +3835,6 @@ function paintAdminAccounts() {
         " Meanwhile, use Temporary password; Forgot password requests appear here.";
   updateSettingsNavCount(adminAcct.admins.filter((x) => x.helpRequestedAt).length);
 }
-// Super Admin: an orange counter on Settings when admins asked for password help on the sign-in page.
 function updateSettingsNavCount(n) {
   const btn = document.querySelector('.nav[data-page="settings"]');
   if (!btn) return;
@@ -3885,7 +3868,6 @@ async function checkPasswordHelpRequests() {
     if (currentPage === "settings") paintAdminAccounts();
   } catch (e) {}
 }
-// Shown once after a temporary password is set. Nothing is stored in the browser.
 function showTemporaryPassword(out, { isNew = false } = {}) {
   const text = `Your On The Way Logistics admin sign-in:\n${location.origin}/dashboard/\nEmail: ${out.email}\nTemporary password: ${out.password}\nYou will be asked to choose your own password when you sign in.`;
   openModal(`<h3>${isNew ? "New admin added: " : "Temporary password for "}${esc(out.name || out.email)}</h3>
@@ -3920,7 +3902,6 @@ async function loadAdminAccounts() {
       body.innerHTML = `<tr><td colspan="7" class="empty">${esc(e.message)}</td></tr>`;
   }
 }
-// Add an admin, or change an admin's name / registered email. The email is also the sign-in ID.
 function adminDetailsModal(x) {
   const isNew = !x;
   openModal(`<h3>${isNew ? "Add admin" : `Edit admin: ${esc(x.name || x.email)}`}</h3>
@@ -4095,7 +4076,7 @@ function bindSettings() {
     if (confirm("Clear the data kept only in this browser (Daily Work, WhatsApp messages, manual payment adjustments)? Server data is not changed.")) {
       db = structuredClone(seed);
       save();
-      rrLoad({ quiet: true }); // approved riders come back from the server
+      rrLoad({ quiet: true });
       toast("This browser's data was reset");
       render("dashboard");
     }
@@ -4171,33 +4152,6 @@ function autoPayStatusBadge(s) {
           : "info";
   return `<span class="badge ${cls}">${esc(s)}</span>`;
 }
-function nextAutoDate(date, frequency) {
-  const d = new Date(
-    (date || new Date().toISOString().slice(0, 10)) + "T00:00:00",
-  );
-  if (frequency === "Daily") d.setDate(d.getDate() + 1);
-  else if (frequency === "Weekly") d.setDate(d.getDate() + 7);
-  else d.setMonth(d.getMonth() + 1);
-  return d.toISOString().slice(0, 10);
-}
-function autopaySummary() {
-  ensurePaymentState();
-  const tx = db.paymentTransactions;
-  return {
-    total: tx.length,
-    successful: tx.filter((x) => x.status === "Successful").length,
-    pending: tx.filter((x) => x.status === "Pending").length,
-    failed: tx.filter((x) => x.status === "Failed").length,
-    collected: tx
-      .filter((x) => x.status === "Successful")
-      .reduce((a, x) => a + Number(x.amount || 0), 0),
-    upcoming: db.autoPays.filter((x) => x.status === "Active").length,
-  };
-}
-function paymentGatewayNotice() {
-  return ``;
-}
-// ---------- Weekly Payments: saved on the server, amounts read from the Excel sheet's amount column ----------
 const formatINR = (n) => PaymentExcel.formatINR(n);
 const WEEKLY_PAGE_SIZE = 25;
 const weeklyStore = {
@@ -4272,89 +4226,6 @@ async function loadWeeklyPayments() {
   )
     render("dashboard");
 }
-// Rows that could not be matched to an approved registered rider are saved provisionally until Admin verifies them.
-function paintPending() {
-  const host = $("#paymentPending");
-  if (!host) return;
-  const d = weeklyStore.pendingData;
-  if (weeklyStore.pendingError) {
-    host.innerHTML = `<div class="card"><div class="section-head"><div><h3>Pending Rider Verification</h3><p class="error">${esc(weeklyStore.pendingError)}</p></div><button type="button" class="btn-sm primary" id="retryPendingRiders">Retry</button></div></div>`;
-    $("#retryPendingRiders")?.addEventListener("click", loadWeeklyPayments);
-    return;
-  }
-  if (!d || !d.pending || !d.pending.length) {
-    host.innerHTML = "";
-    return;
-  }
-  const options = d.registrations
-    .map(
-      (r) =>
-        `<option value="${esc(r.riderId)}">${esc(r.rider)} (${esc(r.riderId)})</option>`,
-    )
-    .join("");
-  host.innerHTML =
-    `<div class="card"><div class="section-head"><div><h3>Pending Rider Verification</h3><p class="muted">${d.pending.length} weekly row${d.pending.length === 1 ? "" : "s"} saved provisionally for ${d.provisionalRiderCount || 0} rider profile(s) awaiting verification. ${d.registeredCount} approved rider${d.registeredCount === 1 ? " is" : "s are"} available to map. Only APPROVED Rider Registration profiles can be selected. Map one row to resolve all weekly records for the same Excel rider.</p></div><button type="button" class="btn-sm" id="refreshPendingRiders">Refresh</button></div>` +
-    (d.registeredCount
-      ? ""
-      : '<p class="hint">No approved riders are available. Open Rider Registration, complete the rider application and approve it, then return here and select Refresh. Pending applications are not eligible for payment mapping.</p>') +
-    `<div class="table-wrap"><table class="table"><thead><tr><th>EXCEL RIDER ID</th><th>RIDER NAME</th><th>WEEK</th><th>DAYS</th><th>TOTAL ORDERS</th><th>TOTAL AMOUNT</th><th>REASON</th><th>MAP TO REGISTERED RIDER</th></tr></thead><tbody>` +
-    d.pending
-      .map(
-        (p) =>
-          `<tr><td>${p.excelRiderId ? esc(p.excelRiderId) : NA_CELL}</td><td>${esc(p.rider)}</td><td>${esc(p.week)}</td><td>${weeklyNum(p.days)}</td><td>${weeklyNum(p.totalOrders)}</td><td>${weeklyAmt(p.amount)}</td><td class="muted">${esc(p.reason)}</td>` +
-          `<td>${d.registeredCount ? `<select class="week-edit-input" id="pmap_${p.id}"><option value="">Choose approved rider…</option>${options}</select> <button type="button" class="btn-sm primary" data-map="${p.id}">Map</button>` : '<span class="muted">Waiting for an approved rider</span>'}</td></tr>`,
-      )
-      .join("") +
-    `</tbody></table></div></div>`;
-  $("#refreshPendingRiders")?.addEventListener("click", loadWeeklyPayments);
-  host.querySelectorAll("[data-map]").forEach((b) =>
-    b.addEventListener("click", async () => {
-      const id = b.dataset.map,
-        riderId = $("#pmap_" + id)?.value || "";
-      if (!riderId) return toast("Choose a registered rider first.");
-      b.disabled = true;
-      try {
-        const out = await weeklyRequest(
-          "/pending/" + encodeURIComponent(id) + "/map",
-          { method: "POST", body: { riderId } },
-        );
-        const source = d.pending.find((x) => String(x.id) === String(id)),
-          target = d.registrations.find(
-            (x) => String(x.riderId) === String(riderId),
-          );
-        if (source && target) {
-          const local = db.riders.find(
-            (x) =>
-              x.provisional &&
-              String(x.excelRiderId || "")
-                .trim()
-                .toLowerCase() ===
-                String(source.excelRiderId || "")
-                  .trim()
-                  .toLowerCase() &&
-              normText(x.name) === normText(source.rider),
-          );
-          if (local) {
-            local.mappedRiderId = target.riderId;
-            local.mappedRiderName = target.rider;
-            for (const rec of [...(db.payments || []), ...(db.work || [])])
-              if (rec.riderId === local.id) {
-                rec.riderId = target.riderId;
-                rec.rider = target.rider;
-              }
-            save();
-          }
-        }
-        toast(
-          `Mapped successfully. ${out.result.importedFromPending} pending weekly row${out.result.importedFromPending === 1 ? "" : "s"} linked to ${esc(out.result.mapped?.riderName || "the registered rider")}.`,
-        );
-      } catch (e) {
-        toast(e.message);
-      }
-      await loadWeeklyPayments();
-    }),
-  );
-}
 function addIsoDays(iso, n) {
   const [y, m, d] = iso.split("-").map(Number),
     t = new Date(Date.UTC(y, m - 1, d + n));
@@ -4366,8 +4237,6 @@ function addIsoDays(iso, n) {
     String(t.getUTCDate()).padStart(2, "0")
   );
 }
-// Manual Adjustment entries are kept exactly as before (they live in the Daily Payment Records of this browser);
-// they are listed here too, marked "Manual", so they do not disappear from the weekly view.
 function manualWeeklyRows() {
   const map = new Map();
   db.payments
@@ -4377,8 +4246,7 @@ function manualWeeklyRows() {
         ws = iso
           ? PaymentExcel.mondayOf(iso)
           : String(p.week || "").slice(0, 10);
-      if (!ws) return;
-      if (!p.riderId) return;
+      if (!ws || !p.riderId) return;
       const key = String(p.riderId).toLowerCase() + "|" + ws;
       if (!map.has(key))
         map.set(key, {
@@ -4408,9 +4276,6 @@ function manualWeeklyRows() {
   return [...map.values()];
 }
 function weeklyAllRows() {
-  // Oldest week at the top, latest at the bottom; undated rows last. Compared as real dates (YYYY-MM-DD), not display text.
-  // Same rule as the server: the week (oldest first), then the Excel sheet, then the row from top to bottom.
-  // Manual adjustments have no sheet row, so they follow the saved rows of their week.
   return [...weeklyStore.rows, ...manualWeeklyRows()].sort(
     (a, b) =>
       (a.weekStart ? 0 : 1) - (b.weekStart ? 0 : 1) ||
@@ -4420,7 +4285,6 @@ function weeklyAllRows() {
       String(a.rider).localeCompare(String(b.rider)),
   );
 }
-// Search: rider name, Rider ID, or the week (as written in the sheet, dd/mm/yyyy, or yyyy-mm-dd).
 function weeklyFilteredRows() {
   const raw = String(weeklyStore.query || "")
       .trim()
@@ -4448,12 +4312,10 @@ function weeklyFilteredRows() {
   });
 }
 const NA_CELL = '<span class="muted">—</span>';
-// A value not supplied by the workbook is shown as a dash. A real zero is shown as 0.
 const weeklyNum = (v) =>
   v === null || v === undefined || v === ""
     ? NA_CELL
     : Number(v).toLocaleString("en-IN");
-// A missing category amount (no rate or no amount in the sheet) is shown as —; a real 0 is shown as ₹0.00.
 const weeklyAmt = (v) =>
   v === null || v === undefined || v === ""
     ? NA_CELL
@@ -4520,8 +4382,6 @@ function weeklyRowsHtml() {
     })
     .join("");
 }
-// Combined totals of every row in the current view (all riders for the selected week or search).
-// A column with no value on any row is shown as N/A, not as 0.
 function weeklyTotalHtml() {
   const rows = weeklyFilteredRows();
   if (!rows.length) return "";
@@ -4542,8 +4402,6 @@ function weeklyTotalHtml() {
     `<td>${amt("amount")}</td></tr>`
   );
 }
-// Rider details for one row of the Weekly Payments table: exactly the values saved for that Rider ID and week.
-// The row is taken from the same filtered list the table was drawn from, so one rider's details never show another's.
 function openWeeklyRiderDetails(index) {
   const p = weeklyFilteredRows()[index];
   if (!p) {
@@ -4578,7 +4436,6 @@ function openWeeklyRiderDetails(index) {
     viewRider(p.riderId);
   });
 }
-// Redraws only the table, so typing in the search box is never interrupted.
 function paintWeeklyPayments() {
   const body = $("#paymentWeeklyRows");
   if (!body) return;
@@ -4618,9 +4475,6 @@ function payments() {
       layout("Payments", "Payment details are restricted to admin access.") +
       `<div class="card"><div class="empty">Only administrators can view payment details.</div></div>`
     );
-  const aps = db.autoPays
-    .slice()
-    .sort((a, b) => String(a.nextDate).localeCompare(String(b.nextDate)));
   return (
     layout(
       "Payment Management",
@@ -4628,17 +4482,6 @@ function payments() {
       `<label class="primary file-picker payment-import-btn"><input type="file" id="paymentExcelImport" accept=".xlsx,.xls" hidden>📥 Import Excel</label><button class="ghost" id="addPayment">+ Manual Adjustment</button>`,
     ) +
     `<div class="card"><div class="section-head"><div><h3>Weekly Payments — Excel Automatic</h3><p class="muted">Everything here is read from the imported Excel sheet and saved on the server, so it stays after you refresh. Total Amount is the amount column of the sheet.</p></div><select class="search" id="paymentCycle" aria-label="Payment cycle" style="max-width:160px;width:100%"><option value="all">All cycles</option><option value="weekly">Weekly</option><option value="15-day">15-day</option></select><input class="search" id="paymentWeeklySearch" type="search" placeholder="Search rider name, rider ID or week..." aria-label="Search weekly payments" value="${esc(weeklyStore.query)}" autocomplete="off" style="max-width:340px;width:100%"></div><div class="table-wrap"><table class="table"><thead><tr><th>S.NO</th><th>RIDER ID</th><th>RIDER NAME</th><th>WEEK</th><th>DAYS</th><th>TOTAL ORDERS</th><th>LM ORDERS</th><th>PRIME ORDERS</th><th>CLUB ORDERS</th><th>SDD ORDERS</th><th>LM AMOUNT</th><th>PRIME AMOUNT</th><th>CLUB AMOUNT</th><th>SDD AMOUNT</th><th>TOTAL AMOUNT</th></tr></thead><tbody id="paymentWeeklyRows">${weeklyRowsHtml()}</tbody><tfoot id="paymentWeeklyTotal">${weeklyTotalHtml()}</tfoot></table></div><div id="weeklyPagination">${weeklyPaginationHtml()}</div><p id="paymentSearchEmpty" class="empty" style="display:none">No matching payment records.</p></div>`
-  );
-}
-function autopayRows(list) {
-  return (
-    list
-      .map(
-        (a) =>
-          `<tr><td><b>${esc(a.payerName)}</b><br><small>${esc(a.payerType || "Partner")} · ${esc(a.email || "")}</small></td><td>₹${Number(a.amount || 0).toFixed(2)}</td><td>${esc(a.frequency)}</td><td>${esc(a.nextDate || "—")}</td><td>${esc(a.method || "UPI AutoPay")}</td><td>${autoPayStatusBadge(a.status)}</td><td>${esc(a.gateway || "Razorpay")}</td><td><div class="mini-actions">${a.status === "Active" ? `<button class="btn-sm" onclick="pauseAutoPay('${a.id}')">Pause</button>` : ""}${a.status === "Paused" ? `<button class="btn-sm" onclick="resumeAutoPay('${a.id}')">Resume</button>` : ""}${a.status !== "Cancelled" ? `<button class="btn-sm danger" onclick="cancelAutoPay('${a.id}')">Cancel</button>` : ""}</div></td></tr>`,
-      )
-      .join("") ||
-    '<tr><td colspan="8" class="empty">No AutoPay mandates yet.</td></tr>'
   );
 }
 function bindPayments() {
@@ -4698,170 +4541,6 @@ function bindPayments() {
     e.target.value = "";
   });
 }
-function openAutoPayModal(existing = null) {
-  const a = existing || {};
-  openModal(
-    `<h3>${existing ? "Edit" : "Create"} AutoPay Authorization</h3><form id="autoPayForm" class="form-grid"><div class="field"><label>Payer / Partner Name</label><input id="apName" required value="${esc(a.payerName || "")}"></div><div class="field"><label>Payer Type</label><select id="apType"><option ${a.payerType === "Vendor" ? "selected" : ""}>Vendor</option><option ${a.payerType === "Franchise" ? "selected" : ""}>Franchise</option><option ${a.payerType === "Rider" ? "selected" : ""}>Rider</option><option ${!a.payerType || a.payerType === "Customer" ? "selected" : ""}>Customer</option></select></div><div class="field"><label>Email</label><input id="apEmail" type="email" value="${esc(a.email || "")}"></div><div class="field"><label>Amount (₹)</label><input id="apAmount" type="number" min="1" step="0.01" required value="${esc(a.amount || "")}"></div><div class="field"><label>Frequency</label><select id="apFrequency"><option ${a.frequency === "Daily" ? "selected" : ""}>Daily</option><option ${a.frequency === "Weekly" || !a.frequency ? "selected" : ""}>Weekly</option><option ${a.frequency === "Monthly" ? "selected" : ""}>Monthly</option></select></div><div class="field"><label>First Payment Date</label><input id="apDate" type="date" required value="${esc(a.nextDate || new Date().toISOString().slice(0, 10))}"></div><div class="field"><label>Payment Method</label><select id="apMethod"><option>UPI AutoPay</option><option>Card Recurring</option></select></div><div class="field"><label>Mandate / Gateway ID (after authorization)</label><input id="apMandate" value="${esc(a.mandateId || "")}" placeholder="Filled by gateway backend"></div><div class="field span2"><label class="consent-check"><input id="apConsent" type="checkbox" ${a.consent ? "checked" : ""}> I confirm that the payer has explicitly authorized recurring payments and has been shown the amount, frequency, next payment date and cancellation terms.</label><p class="hint">This form only records the authorization request. It does not charge the payer. A real mandate must be created and confirmed by Razorpay on the server.</p></div><div class="modal-actions span2"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="button" class="secondary" id="authorizeRazorpay">Authorize with Razorpay</button><button class="primary">Save Authorization Request</button></div></form>`,
-  );
-  const saveAutoPayRecord = () => {
-    if (!$("#apConsent").checked) {
-      toast("Explicit AutoPay consent is required.");
-      return null;
-    }
-    ensurePaymentState();
-    const obj = {
-      id: a.id || uid("AP"),
-      payerName: $("#apName").value.trim(),
-      payerType: $("#apType").value,
-      email: $("#apEmail").value.trim(),
-      amount: Number($("#apAmount").value),
-      frequency: $("#apFrequency").value,
-      nextDate: $("#apDate").value,
-      method: $("#apMethod").value,
-      mandateId: $("#apMandate").value.trim(),
-      status: a.status || "Pending Authorization",
-      consent: true,
-      consentAt: a.consentAt || new Date().toISOString(),
-      gateway: "Razorpay",
-      createdAt: a.createdAt || new Date().toISOString(),
-      retryCount: 0,
-    };
-    if (a.id) Object.assign(a, obj);
-    else db.autoPays.push(obj);
-    auditPayment(
-      a.id
-        ? "autopay_authorization_updated"
-        : "autopay_authorization_requested",
-      {
-        id: obj.id,
-        payer: obj.payerName,
-        amount: obj.amount,
-        frequency: obj.frequency,
-      },
-    );
-    save();
-    return obj;
-  };
-  $("#autoPayForm").onsubmit = (e) => {
-    e.preventDefault();
-    const obj = saveAutoPayRecord();
-    if (!obj) return;
-    closeModal();
-    render("payments");
-    toast(
-      "AutoPay authorization request saved. Gateway authorization is still required.",
-    );
-  };
-  $("#authorizeRazorpay").onclick = async () => {
-    const obj = saveAutoPayRecord();
-    if (!obj) return;
-    try {
-      const r = await fetch("/api/autopay/create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          payerName: obj.payerName,
-          payerEmail: obj.email,
-          payerType: obj.payerType,
-          amount: obj.amount,
-          frequency: obj.frequency,
-          consent: true,
-        }),
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || "Gateway request failed");
-      obj.mandateId = data.id;
-      obj.gatewaySubscriptionId = data.id;
-      obj.status = "Pending Authorization";
-      save();
-      auditPayment("razorpay_authorization_created", {
-        id: obj.id,
-        gatewaySubscriptionId: data.id,
-      });
-      if (data.short_url) {
-        window.open(data.short_url, "_blank", "noopener");
-        toast(
-          "Razorpay authorization page opened. Complete payer consent there.",
-        );
-      } else toast("Razorpay authorization request created.");
-      closeModal();
-      render("payments");
-    } catch (err) {
-      toast("Razorpay backend unavailable: " + err.message);
-    }
-  };
-}
-function openRetryPolicyModal() {
-  ensurePaymentState();
-  const c = db.paymentConfig;
-  openModal(
-    `<h3>AutoPay Retry Policy</h3><form id="retryForm" class="form-grid"><div class="field"><label>Max retries</label><input id="retryCount" type="number" min="0" max="5" value="${c.retryCount}"></div><div class="field"><label>Retry delay (hours)</label><input id="retryDelay" type="number" min="1" max="168" value="${c.retryDelayHours}"></div><div class="field span2"><label class="consent-check"><input id="reminders" type="checkbox" ${c.reminders ? "checked" : ""}> Send pre-debit and failure reminders from the backend notification service</label></div><div class="modal-actions span2"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button class="primary">Save Policy</button></div></form>`,
-  );
-  $("#retryForm").onsubmit = (e) => {
-    e.preventDefault();
-    db.paymentConfig.retryCount = Math.min(
-      5,
-      Math.max(0, Number($("#retryCount").value) || 0),
-    );
-    db.paymentConfig.retryDelayHours = Math.min(
-      168,
-      Math.max(1, Number($("#retryDelay").value) || 24),
-    );
-    db.paymentConfig.reminders = $("#reminders").checked;
-    save();
-    auditPayment("retry_policy_updated", db.paymentConfig);
-    closeModal();
-    render("payments");
-  };
-}
-
-async function updateAutoPay(id, status) {
-  ensurePaymentState();
-  const a = db.autoPays.find((x) => x.id === id);
-  if (!a) return;
-  const old = a.status;
-  if (a.gatewaySubscriptionId || a.mandateId) {
-    const endpoint =
-      status === "Paused" ? "pause" : status === "Active" ? "resume" : "cancel";
-    try {
-      const r = await fetch(
-        "/api/autopay/" +
-          encodeURIComponent(a.gatewaySubscriptionId || a.mandateId) +
-          "/" +
-          endpoint,
-        { method: "POST" },
-      );
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || "Gateway update failed");
-    } catch (err) {
-      toast("Gateway update failed: " + err.message);
-      return;
-    }
-  }
-  a.status = status;
-  if (status === "Active" && !a.nextDate)
-    a.nextDate = new Date().toISOString().slice(0, 10);
-  save();
-  auditPayment("autopay_status_changed", {
-    id,
-    payer: a.payerName,
-    from: old,
-    to: status,
-  });
-  render("payments");
-  toast(`AutoPay ${status.toLowerCase()}`);
-}
-window.pauseAutoPay = (id) => updateAutoPay(id, "Paused");
-window.resumeAutoPay = (id) => updateAutoPay(id, "Active");
-window.cancelAutoPay = (id) => {
-  if (
-    confirm(
-      "Cancel this AutoPay mandate? The gateway mandate will be cancelled when backend is configured.",
-    )
-  )
-    updateAutoPay(id, "Cancelled");
-};
-
 window.downloadPartnerDocument = async (applicationId, documentId, fileName) => {
   try {
     const response = await fetch(PARTNER_API_BASE + `/api/partner-applications/${encodeURIComponent(applicationId)}/documents/${encodeURIComponent(documentId)}`, { credentials: "include" });
@@ -5033,8 +4712,6 @@ window.viewPartner = (id) => {
   );
 };
 
-// Opening "View form" also fetches the latest data (e.g. whether the partner has signed in yet)
-// and refreshes the open form when it arrives.
 {
   const showForm = window.viewPartner;
   window.viewPartner = (id) => {
@@ -5049,9 +4726,6 @@ window.viewPartner = (id) => {
   };
 }
 
-// ---------- Share imported payments with vendor / franchise portals ----------
-// The server matches each row to the partner whose Riders list has that rider (Rider ID / Partner ID, or name),
-// fills that partner's Orders page and sends them a notification.
 async function sharePaymentImport(fileName, records, fileHash = "") {
   if (!records.length) return;
   try {
@@ -5103,9 +4777,7 @@ function showShareSummary(o) {
     <div class="modal-actions"><button type="button" class="primary" onclick="closeModal()">OK</button></div>`);
 }
 
-/* ========================= Rider member registrations (Admin) =========================
-   Riders registered by the Admin, a Vendor or a Franchise. Saved on the server; every registration
-   appears in Client > Client Members. Documents are opened only on request and only for signed-in admins. */
+/* ========================= Rider member registrations (Admin) ========================= */
 let rrItems = [];
 let rrObjectUrl = null;
 const RR_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
@@ -5153,7 +4825,6 @@ function rrCleanMobile(value) {
   if (d.length === 11 && d.startsWith("0")) d = d.slice(1);
   return /^[6-9]\d{9}$/.test(d) ? d : "";
 }
-// Same rules as the server. Returns [fieldId, message] for the first problem, or null.
 function rrCheckFields(v) {
   if (!/^[A-Za-z0-9][A-Za-z0-9\-_\/]{1,39}$/.test(v.id))
     return [
@@ -5204,9 +4875,6 @@ async function rrCall(url, { method = "GET", body } = {}) {
   }
   return out;
 }
-// Approved rider registrations live on the server. They are copied into the Admin Riders list (kept in this browser),
-// so every admin sees the same approved riders on Riders, Dashboard and Documents. A provisional Excel profile with
-// the same name becomes that registered rider. Riders an admin removed here stay hidden in this browser.
 function syncRegisteredRiders() {
   if (!Array.isArray(db.hiddenRegistrations)) db.hiddenRegistrations = [];
   let changed = false;
@@ -5274,7 +4942,7 @@ function syncRegisteredRiders() {
 function rrPendingCount() {
   return (rrItems || []).filter((r) => r.status === "PENDING").length;
 }
-let rrKnownPending = null; // ids already seen, so only riders added since then are announced
+let rrKnownPending = null;
 function announceNewPartnerRiders() {
   const pending = (rrItems || []).filter((r) => r.status === "PENDING");
   const fresh = rrKnownPending ? pending.filter((r) => !rrKnownPending.has(r.id) && r.ownerLoginId) : [];
@@ -5391,7 +5059,6 @@ function rrBindClientPage() {
   rrRender();
   rrLoad();
 }
-// View / Approve / Reject / documents buttons in a registrations table (Client Members and the Riders page).
 function rrTableClick(e) {
   const b = e.target.closest("button[data-rr-act],button[data-rr-doc]");
   if (!b) return;
@@ -5412,7 +5079,6 @@ function rrRevokeDocument() {
     rrObjectUrl = null;
   }
 }
-// Opens a selfie or Aadhaar for viewing only. Fetched with the admin's session; never linked publicly.
 async function rrOpenDocument(id, kind, title) {
   try {
     const r = await fetch(
@@ -5471,7 +5137,6 @@ function rrConfirmDecision(item, status) {
       rrItems = rrItems.map((x) => (x.id === item.id ? out.item : x));
       closeModal();
       rrRender();
-      // An approved rider joins the Riders list straight away (a rejected one is marked Inactive there).
       if (!syncRegisteredRiders() && currentPage === "riders") paintRiders();
       toast(`${item.applicationId} ${approve ? "approved" : "rejected"}`);
     } catch (e) {
@@ -5524,7 +5189,6 @@ async function rrViewDetail(id) {
     toast(e.message);
   }
 }
-// "+ Add New Member" on the Riders page.
 function rrOpenForm() {
   openModal(`<h3>Add New Member</h3>
     <p class="muted">Register a rider with both documents. The application is saved at once and appears in Client Members as <b>PENDING</b>.</p>
@@ -5562,9 +5226,6 @@ function rrFormFail(field, message) {
   $("#rrFormError").textContent = message || "Could not save the rider.";
   if (el && el.focus) el.focus();
 }
-// Shows the chosen document with its name, size and a preview; rejects the wrong type or size at once.
-// Choosing a delivery-app screenshot fills in Rider ID and Rider Name (read on the server, the file is not stored by
-// that request). Typed values are never overwritten; filled fields are highlighted for checking.
 async function rrAutoFillFromScreenshot(file) {
   const idEl = $("#rrId"),
     nameEl = $("#rrName"),

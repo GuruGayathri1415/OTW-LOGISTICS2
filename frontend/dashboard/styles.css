@@ -6,6 +6,43 @@
   margin-bottom: 8px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
 }
+
+.nav[data-page="support"] {
+  display: flex;
+  align-items: center;
+}
+
+.support-red-alert {
+  margin-left: auto;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #dc2626;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 20px;
+  text-align: center;
+  box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.75);
+  animation: supportRedPulse 1.5s infinite;
+}
+
+.support-red-alert[hidden] {
+  display: none !important;
+}
+
+@keyframes supportRedPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.75);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(220, 38, 38, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(220, 38, 38, 0);
+  }
+}
 .sidebar-logo {
   width: 185px;
   height: 72px;
@@ -1682,7 +1719,10 @@ body:before {
   display: grid;
   place-items: center;
   position: relative;
-  background: conic-gradient(#16d995 0 calc(var(--p, 0) * 1%), #0b3159 calc(var(--p, 0) * 1%));
+  background: conic-gradient(
+    #16d995 0 calc(var(--p, 0) * 1%),
+    #0b3159 calc(var(--p, 0) * 1%)
+  );
   box-shadow: 0 0 30px rgba(22, 217, 149, 0.16);
 }
 .donut:after {
@@ -2084,7 +2124,10 @@ body:before {
   color: #72879a;
 }
 .donut {
-  background: conic-gradient(#17b786 0 calc(var(--p, 0) * 1%), #dbe8f0 calc(var(--p, 0) * 1%));
+  background: conic-gradient(
+    #17b786 0 calc(var(--p, 0) * 1%),
+    #dbe8f0 calc(var(--p, 0) * 1%)
+  );
   box-shadow: 0 0 30px rgba(22, 183, 134, 0.12);
 }
 .donut:after {
