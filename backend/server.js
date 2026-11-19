@@ -64,6 +64,10 @@ const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
 const ORIGIN = process.env.ALLOWED_ORIGIN || `http://localhost:${PORT}`;
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "supportontheway@gmail.com";
+const gmailConfig = gmailConfigFrom(process.env);
+const gmailApi = createGmailApi({ config: gmailConfig, log: console });
+
 const db = new Database(path.join(DATA_DIR, "payments.sqlite"));
 db.pragma("journal_mode = WAL");
 db.exec(`CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY,payer_name TEXT NOT NULL,payer_email TEXT,payer_type TEXT,amount INTEGER NOT NULL,frequency TEXT NOT NULL,status TEXT NOT NULL,gateway TEXT NOT NULL DEFAULT 'razorpay',gateway_subscription_id TEXT UNIQUE,mandate_id TEXT,consent_at TEXT NOT NULL,created_at TEXT NOT NULL,next_payment_at TEXT,retry_count INTEGER NOT NULL DEFAULT 0);CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY AUTOINCREMENT,gateway_payment_id TEXT UNIQUE,subscription_id TEXT,gateway_subscription_id TEXT,transaction_id TEXT,amount INTEGER,status TEXT,method TEXT,payer_name TEXT,payment_date TEXT,auto_pay_status TEXT,raw_event TEXT,created_at TEXT);CREATE TABLE IF NOT EXISTS audit_log(id INTEGER PRIMARY KEY AUTOINCREMENT,admin_email TEXT,action TEXT,details TEXT,created_at TEXT);
@@ -550,6 +554,9 @@ const passwordResets = createPasswordResetService({
   audit,
   log: console,
   sendMail: async ({ to, subject, text }) => {
+    if (gmailApi.configured()) {
+      return gmailApi.sendMail({ to, subject, text });
+    }
     const mail = getMailTransporter();
     if (!mail) throw new Error("Email sending is not configured");
     try {
@@ -570,13 +577,20 @@ const passwordResets = createPasswordResetService({
 // email address, so it does not reveal who is an admin.
 let mailCheck = { at: 0, ready: false, problem: "", detail: "" };
 async function mailStatus({ fresh = false } = {}) {
+  if (gmailApi.configured()) {
+    return {
+      ready: true,
+      problem: "",
+      detail: `Email is ready (sending via Gmail API as ${gmailConfig.user || SUPPORT_EMAIL}).`,
+    };
+  }
   const mail = getMailTransporter();
   if (!mail)
     return {
       ready: false,
       problem: "not_configured",
       detail:
-        "Email is not set up. Add GMAIL_USER and GMAIL_APP_PASSWORD (or the SMTP settings) to backend/.env and restart the server.",
+        "Email is not set up. Add GMAIL_OAUTH_* (or GMAIL_USER and GMAIL_APP_PASSWORD) to backend/.env and restart the server.",
     };
   const maxAge = mailCheck.ready ? 10 * 60_000 : 60_000;
   if (!fresh && mailCheck.at && Date.now() - mailCheck.at < maxAge)
@@ -962,16 +976,26 @@ async function emailApplicant(app, message) {
           ? "Email sending is not set up yet (backend/.env)."
           : "Email could not be sent: the email settings or connection are not working (see the server window).",
     };
-  const mail = getMailTransporter();
   try {
-    await mail.transporter.sendMail({
-      from: { name: "ON THE WAY LOGISTICS", address: mail.user },
-      replyTo: SUPPORT_EMAIL,
-      to,
-      subject: message.subject,
-      text: message.text,
-      html: message.html,
-    });
+    if (gmailApi.configured()) {
+      await gmailApi.sendMail({
+        replyTo: SUPPORT_EMAIL,
+        to,
+        subject: message.subject,
+        text: message.text,
+        html: message.html,
+      });
+    } else {
+      const mail = getMailTransporter();
+      await mail.transporter.sendMail({
+        from: { name: "ON THE WAY LOGISTICS", address: mail.user },
+        replyTo: SUPPORT_EMAIL,
+        to,
+        subject: message.subject,
+        text: message.text,
+        html: message.html,
+      });
+    }
     return { sent: true, to, reason: "" };
   } catch (e) {
     console.error("Applicant email failed:", e.message);
@@ -1237,7 +1261,9 @@ app.post("/api/partner-applications", applicationLimiter, (req, res, next) => pa
     if (createdBy)
       audit(createdBy, "partner_application_created", { appId, type });
     const willEmail =
-      !createdBy && EMAIL_OK.test(String(payload.email || "").trim()) && !!getMailTransporter() && mailCheck.ready === true;
+      !createdBy &&
+      EMAIL_OK.test(String(payload.email || "").trim()) &&
+      (gmailApi.configured() || (!!getMailTransporter() && mailCheck.ready === true));
     const responseApplication = { ...payload, documents: documents.map(({ storedName, ...doc }) => doc) };
     res.status(201).json({ ok: true, application: responseApplication, confirmationEmail: willEmail });
     if (adminNote?.created) {
@@ -2418,8 +2444,7 @@ app.post("/api/autopay/:id/cancel", adminGuard, async (req, res) => {
 
 // ===================== Helpline / Support (Vendor, Franchise and Admin) =====================
 // Tickets are stored in the database (support-tickets.js) and handled by the routes in support-routes.js.
-// Email is sent with the Gmail account in .env (GMAIL_USER + GMAIL_APP_PASSWORD), or SMTP_* if those are set.
-const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "supportontheway@gmail.com";
+// Email is sent with the Gmail account in .env (GMAIL_OAUTH_* or GMAIL_USER + GMAIL_APP_PASSWORD), or SMTP_* if those are set.
 // The Vendor / Franchise portals show this address, so the address shown is always the one that receives the messages.
 app.get("/api/support-info", (req, res) => res.json({ ok: true, email: SUPPORT_EMAIL }));
 let mailTransporter = null;
@@ -2477,8 +2502,6 @@ function supportAdminRecipients() {
 }
 // Gmail API (OAuth 2.0) when GMAIL_OAUTH_* is configured; otherwise SMTP with the App Password.
 // The Gmail API sends as the authorised support account. Errors are returned as text, never with secrets.
-const gmailConfig = gmailConfigFrom(process.env);
-const gmailApi = createGmailApi({ config: gmailConfig, log: console });
 function smtpProblem() {
   const pass = String(process.env.GMAIL_APP_PASSWORD || "").trim();
   if (!pass) return "GMAIL_APP_PASSWORD is empty in backend/.env";
