@@ -9,6 +9,10 @@
     {
       "source": "/api/:path*",
       "destination": "https://otw-logistics2.onrender.com/api/:path*"
+    },
+    {
+      "source": "/api/:path*/",
+      "destination": "https://otw-logistics2.onrender.com/api/:path*"
     }
   ],
   "headers": [
