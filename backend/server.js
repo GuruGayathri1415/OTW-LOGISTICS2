@@ -304,7 +304,7 @@ app.use(
 const adminGuard = auth.requireRole("admin");
 async function adminEmailOf(req) {
   const s = await auth.getSession(req, "admin");
-  return s && !s.account.must_change_password
+  return s?.account && !s.account.must_change_password
     ? s.account.email || s.account.login_id
     : "";
 }
