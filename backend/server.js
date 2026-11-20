@@ -2140,7 +2140,7 @@ async function addNotification(accountId, kind, title, body, meta) {
     .run(accountId, accountId);
 }
 
-const paymentImports = createPaymentImportService({ db, audit });
+const paymentImports = await createPaymentImportService({ db, audit });
 
 async function projectPaymentVersion(versionId, matched, fileName) {
   const now = new Date().toISOString();
@@ -2602,12 +2602,12 @@ console.log(
 );
 
 const supportService = await createSupportService({ db, uploadDir: UPLOAD_DIR });
-const supportMailer = createSupportMailer({
+const supportMailer = await createSupportMailer({
   db,
   uploadDir: UPLOAD_DIR,
   transport: { sendMail: (m) => sendSupportMail(m) },
 });
-const supportInbound = createGmailInbound({
+const supportInbound = await createGmailInbound({
   db,
   api: gmailApi,
   service: supportService,
@@ -2701,7 +2701,7 @@ registerWeeklyPaymentRoutes(app, {
 const requireCjs = createRequire(import.meta.url);
 const XLSX = requireCjs("xlsx");
 const PaymentExcel = requireCjs("./shared/payment-excel.cjs");
-const driveSync = createDriveSyncService({
+const driveSync = await createDriveSyncService({
   db,
   weeklyPayments: weeklyPaymentService,
   audit,
