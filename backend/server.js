@@ -2601,7 +2601,7 @@ console.log(
     : `[support-email] Gmail API not connected; using SMTP. ${smtpProblem() || "SMTP password found."}`,
 );
 
-const supportService = createSupportService({ db, uploadDir: UPLOAD_DIR });
+const supportService = await createSupportService({ db, uploadDir: UPLOAD_DIR });
 const supportMailer = createSupportMailer({
   db,
   uploadDir: UPLOAD_DIR,
@@ -2632,7 +2632,7 @@ registerSupportRoutes(app, {
   supportInbound.start(60_000);
 }
 
-const riderRegistrations = createRiderRegistrationService({
+const riderRegistrations = await createRiderRegistrationService({
   db,
   uploadDir: UPLOAD_DIR,
   audit,
@@ -2643,7 +2643,7 @@ registerRiderRegistrationRoutes(app, {
   onApproved: (actor) => weeklyPaymentService.recheckPending(actor),
 });
 
-const hubService = createHubService({
+const hubService = await createHubService({
   db,
   audit,
   seedRows: JSON.parse(
@@ -2652,16 +2652,21 @@ const hubService = createHubService({
 });
 registerHubRoutes(app, { guard: adminGuard, service: hubService });
 
-const locationService = createLocationService({ db, audit, hubService });
+const locationService = await createLocationService({ db, audit, hubService });
 registerLocationRoutes(app, {
   partnerGuard: auth.requireRole("vendor", "franchise"),
   adminGuard,
   service: locationService,
 });
 
+const adminDocumentService = await createAdminDocumentService({
+  db,
+  uploadDir: UPLOAD_DIR,
+  audit,
+});
 registerAdminDocumentRoutes(app, {
   guard: adminGuard,
-  service: createAdminDocumentService({ db, uploadDir: UPLOAD_DIR, audit }),
+  service: adminDocumentService,
 });
 
 async function notifyPartnersOfWeeklyRows({ importId, fileName }) {
@@ -2682,7 +2687,7 @@ async function notifyPartnersOfWeeklyRows({ importId, fileName }) {
   }
 }
 
-const weeklyPaymentService = createWeeklyPaymentService({
+const weeklyPaymentService = await createWeeklyPaymentService({
   db,
   audit,
   riderRegistry: true,
