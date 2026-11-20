@@ -1,6 +1,6 @@
 // Location Management: partner-submitted locations (franchise and vendor portals) approved by the Admin Portal.
 //
-// Locations live in the `partner_locations` table of the same database as the rest of the backend, so both
+// Locations live in the `partner_locations` table of the PostgreSQL database, so both
 // portals and the admin dashboard read the same rows. Rules (validation, duplicate checks, status changes, roles)
 // are here so they can be tested without the web framework; registerLocationRoutes() exposes them over HTTP.
 //
@@ -55,7 +55,7 @@ const duplicateKey = (l) =>
 const STATE_BY_KEY = new Map(INDIA_STATES.map((n) => [sameKey(n), n]));
 export const officialState = (value) => STATE_BY_KEY.get(sameKey(value)) || "";
 const isUniqueViolation = (err) =>
-  /UNIQUE constraint failed/.test(String(err?.message || ""));
+  err?.code === "23505" || /UNIQUE constraint failed|duplicate key/i.test(String(err?.message || ""));
 
 // Checks the five mandatory fields. Returns the cleaned values or throws LocationError (400) listing every problem.
 export function validateLocationInput(input = {}) {
@@ -124,7 +124,7 @@ export function cleanMapUrl(value) {
   return u.href;
 }
 
-export function createLocationService({
+export async function createLocationService({
   db,
   audit = () => {},
   now = () => new Date().toISOString(),
@@ -134,7 +134,7 @@ export function createLocationService({
   if (!hubService)
     throw new Error("createLocationService needs hubService: approving a location creates its hub.");
 
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS partner_locations(
       id TEXT PRIMARY KEY,
       owner_account_id TEXT NOT NULL,
@@ -165,56 +165,46 @@ export function createLocationService({
   `);
 
   // Databases created before the map link and the State field was added get the columns on first start.
-  const columns = db.prepare("PRAGMA table_info(partner_locations)").all().map((c) => c.name);
+  const columnRows = await db
+    .prepare(
+      `SELECT column_name AS name
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'partner_locations'`,
+    )
+    .all();
+  const columns = columnRows.map((c) => c.name);
   if (!columns.includes("location_url"))
-    db.exec("ALTER TABLE partner_locations ADD COLUMN location_url TEXT NOT NULL DEFAULT ''");
+    await db.exec("ALTER TABLE partner_locations ADD COLUMN location_url TEXT NOT NULL DEFAULT ''");
   if (!columns.includes("state"))
-    db.exec("ALTER TABLE partner_locations ADD COLUMN state TEXT NOT NULL DEFAULT ''");
-
-  // Runs fn in one database transaction. If fn throws, every change it made is rolled back.
-  function inTransaction(fn) {
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      const out = fn();
-      db.exec("COMMIT");
-      return out;
-    } catch (err) {
-      try {
-        db.exec("ROLLBACK");
-      } catch (_) {
-        /* nothing to roll back */
-      }
-      throw err;
-    }
-  }
+    await db.exec("ALTER TABLE partner_locations ADD COLUMN state TEXT NOT NULL DEFAULT ''");
 
   // The verified applicant for a partner: the partner application that was accepted. Returns null when there
   // is none (or the accounts / applications tables are not present, as in a bare test database).
-  function verifiedApplication(ownerId) {
+  async function verifiedApplication(ownerId, executor = db) {
     try {
-      const account = db
+      const account = await executor
         .prepare("SELECT application_id FROM accounts WHERE id=?")
         .get(ownerId);
       if (!account?.application_id) return null;
-      const app = db
+      const app = await executor
         .prepare("SELECT name, mobile, state, status FROM partner_applications WHERE id=?")
         .get(account.application_id);
       if (!app || !["Accepted", "Approved"].includes(app.status)) return null;
       return app;
     } catch (err) {
-      if (/no such table/.test(String(err?.message || ""))) return null;
+      if (/no such table|does not exist/i.test(String(err?.message || ""))) return null;
       throw err;
     }
   }
   // In-Charge and Phone for the hub come from the verified applicant (blank when there is none).
-  function verifiedContact(ownerId) {
-    const app = verifiedApplication(ownerId);
+  async function verifiedContact(ownerId, executor = db) {
+    const app = await verifiedApplication(ownerId, executor);
     return app ? { name: app.name || "", mobile: app.mobile || "" } : {};
   }
   // The State of the verified application, offered as the default State on the Add Location form.
   // Only an official State name is used; anything else is left for the partner to choose.
-  function verifiedState(ownerId) {
-    const app = verifiedApplication(ownerId);
+  async function verifiedState(ownerId, executor = db) {
+    const app = await verifiedApplication(ownerId, executor);
     return app ? officialState(app.state || "") : "";
   }
 
@@ -231,7 +221,7 @@ export function createLocationService({
   });
 
   // Shape sent to the browser. Partners never see another partner's rows or the admin-only details.
-  function toDto(row, { admin = false } = {}) {
+  async function toDto(row, { admin = false } = {}) {
     const dto = {
       id: row.id,
       name: row.location_name,
@@ -253,31 +243,32 @@ export function createLocationService({
       dto.ownerLoginId = row.owner_login_id;
       dto.updatedBy = row.updated_by || "";
       dto.decidedBy = row.decided_by || "";
-      const hub = hubService.findBySourceLocation(row.id);
+      const hub = await hubService.findBySourceLocation(row.id);
       dto.hub = hub ? { id: hub.id, name: hub.name, status: hub.status } : null;
     }
     return dto;
   }
 
-  const getRow = (id) =>
-    db.prepare("SELECT * FROM partner_locations WHERE id=?").get(id);
+  const getRow = (id, executor = db) =>
+    executor.prepare("SELECT * FROM partner_locations WHERE id=?").get(id);
 
-  function requireRow(id) {
-    const row = getRow(String(id || ""));
+  async function requireRow(id, executor = db) {
+    const row = await getRow(String(id || ""), executor);
     if (!row) throw new LocationError(404, "This location was not found.");
     return row;
   }
 
   // A location with the same details counts as a duplicate while it is in one of the given statuses.
   // ownerId "" checks every partner (used by the admin); otherwise only that partner's own locations are checked.
-  function findDuplicate(
+  async function findDuplicate(
     ownerId,
     key,
     exceptId = "",
     statuses = [LOCATION_STATUS.PENDING, LOCATION_STATUS.ACTIVE],
+    executor = db,
   ) {
     const marks = statuses.map(() => "?").join(",");
-    return db
+    return executor
       .prepare(
         `SELECT id FROM partner_locations
          WHERE duplicate_key=? AND status IN (${marks}) AND id<>?
@@ -293,48 +284,50 @@ export function createLocationService({
       );
   }
 
-  function isSubmissionDuplicate(ownerId, submissionKey) {
-    return !!db
+  async function isSubmissionDuplicate(ownerId, submissionKey, executor = db) {
+    return !!(await executor
       .prepare(
         "SELECT id FROM partner_locations WHERE owner_account_id=? AND submission_key=?",
       )
-      .get(ownerId, submissionKey);
+      .get(ownerId, submissionKey));
   }
 
-  function insertWithFreeId(row) {
+  async function insertWithFreeId(row) {
     for (let attempt = 0; attempt < 10; attempt++) {
       try {
         const id = randomId();
-        db.prepare(
-          `INSERT INTO partner_locations(id,owner_account_id,owner_login_id,owner_role,applied_by_name,
-            location_name,state,city,district,area,pin_code,location_url,duplicate_key,status,submission_key,
-            created_at,updated_at,updated_by)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        ).run(
-          id,
-          row.ownerId,
-          row.ownerLoginId,
-          row.ownerRole,
-          row.appliedBy,
-          row.v.name,
-          row.v.state,
-          row.v.city,
-          row.v.district,
-          row.v.area,
-          row.v.pin,
-          row.url,
-          duplicateKey(row.v),
-          LOCATION_STATUS.PENDING,
-          row.submissionKey,
-          row.at,
-          row.at,
-          row.actor,
-        );
+        await db
+          .prepare(
+            `INSERT INTO partner_locations(id,owner_account_id,owner_login_id,owner_role,applied_by_name,
+              location_name,state,city,district,area,pin_code,location_url,duplicate_key,status,submission_key,
+              created_at,updated_at,updated_by)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          )
+          .run(
+            id,
+            row.ownerId,
+            row.ownerLoginId,
+            row.ownerRole,
+            row.appliedBy,
+            row.v.name,
+            row.v.state,
+            row.v.city,
+            row.v.district,
+            row.v.area,
+            row.v.pin,
+            row.url,
+            duplicateKey(row.v),
+            LOCATION_STATUS.PENDING,
+            row.submissionKey,
+            row.at,
+            row.at,
+            row.actor,
+          );
         return id;
       } catch (err) {
         if (!isUniqueViolation(err)) throw err;
         // A repeated submission key from the same partner returns the record it already created (see submit).
-        if (row.submissionKey && isSubmissionDuplicate(row.ownerId, row.submissionKey))
+        if (row.submissionKey && (await isSubmissionDuplicate(row.ownerId, row.submissionKey)))
           return null;
       }
     }
@@ -344,19 +337,19 @@ export function createLocationService({
   // ---------- partner side ----------
   // account: the signed-in vendor or franchise account. submissionKey: a value the browser creates once per form,
   // so a double click or a retry after a slow network does not create a second location.
-  function submit(account, input = {}, submissionKey = "") {
+  async function submit(account, input = {}, submissionKey = "") {
     const key = clean(submissionKey).slice(0, 80);
     if (key) {
-      const prior = db
+      const prior = await db
         .prepare(
           "SELECT * FROM partner_locations WHERE owner_account_id=? AND submission_key=?",
         )
         .get(account.id, key);
-      if (prior) return { duplicate: true, location: toDto(prior) };
+      if (prior) return { duplicate: true, location: await toDto(prior) };
     }
-    const v = validateLocationInput(withDefaultState(account.id, input));
+    const v = validateLocationInput(await withDefaultState(account.id, input));
     const url = cleanMapUrl(input.url);
-    const dup = findDuplicate(account.id, duplicateKey(v));
+    const dup = await findDuplicate(account.id, duplicateKey(v));
     if (dup)
       throw new LocationError(
         409,
@@ -365,7 +358,7 @@ export function createLocationService({
       );
     const at = now();
     const appliedBy = clean(account.name) || account.login_id;
-    const id = insertWithFreeId({
+    const id = await insertWithFreeId({
       ownerId: account.id,
       ownerLoginId: account.login_id,
       ownerRole: account.role,
@@ -377,34 +370,34 @@ export function createLocationService({
       actor: account.login_id,
     });
     if (!id) {
-      const prior = db
+      const prior = await db
         .prepare(
           "SELECT * FROM partner_locations WHERE owner_account_id=? AND submission_key=?",
         )
         .get(account.id, key);
-      return { duplicate: true, location: toDto(prior) };
+      return { duplicate: true, location: await toDto(prior) };
     }
-    audit(account.login_id, "location.submit", { id, ...v, url });
-    return { duplicate: false, location: toDto(getRow(id)) };
+    await audit(account.login_id, "location.submit", { id, ...v, url });
+    return { duplicate: false, location: await toDto(await getRow(id)) };
   }
 
-  function withDefaultState(ownerId, input) {
+  async function withDefaultState(ownerId, input) {
     if (clean(input.state)) return input;
-    return { ...input, state: verifiedState(ownerId) };
+    return { ...input, state: await verifiedState(ownerId) };
   }
 
   // Partner edit / delete. Only the owner can change a location, and only while it is not approved:
   // Pending Approval and Rejected locations can be edited (a Rejected one goes back to Pending Approval),
   // Active (approved) locations are read-only for the partner.
-  function requireOwnRow(account, id) {
-    const row = getRow(String(id || ""));
+  async function requireOwnRow(account, id) {
+    const row = await getRow(String(id || ""));
     if (!row || row.owner_account_id !== account.id)
       throw new LocationError(404, "This location was not found.");
     return row;
   }
 
-  function updateOwn(account, id, input = {}) {
-    const row = requireOwnRow(account, id);
+  async function updateOwn(account, id, input = {}) {
+    const row = await requireOwnRow(account, id);
     if (row.status === LOCATION_STATUS.ACTIVE)
       throw new LocationError(
         409,
@@ -412,7 +405,7 @@ export function createLocationService({
       );
     const merged = {
       name: input.name ?? row.location_name,
-      state: clean(input.state) || row.state || verifiedState(account.id),
+      state: clean(input.state) || row.state || (await verifiedState(account.id)),
       city: input.city ?? row.city,
       district: input.district ?? row.district,
       area: input.area ?? row.area,
@@ -421,81 +414,83 @@ export function createLocationService({
     const v = validateLocationInput(merged);
     const url = input.url === undefined ? row.location_url || "" : cleanMapUrl(input.url);
     const key = duplicateKey(v);
-    if (findDuplicate(account.id, key, row.id))
+    if (await findDuplicate(account.id, key, row.id))
       throw new LocationError(409, "This location has already been submitted.", "name");
     const at = now();
     const resubmit = row.status === LOCATION_STATUS.REJECTED;
-    db.prepare(
-      `UPDATE partner_locations SET location_name=?,state=?,city=?,district=?,area=?,pin_code=?,location_url=?,
-         duplicate_key=?,status=?,reject_reason='',updated_at=?,updated_by=? WHERE id=?`,
-    ).run(
-      v.name,
-      v.state,
-      v.city,
-      v.district,
-      v.area,
-      v.pin,
-      url,
-      key,
-      LOCATION_STATUS.PENDING,
-      at,
-      account.login_id,
-      row.id,
-    );
-    audit(account.login_id, resubmit ? "location.resubmit" : "location.partner_edit", { id: row.id, ...v, url });
-    return toDto(getRow(row.id));
+    await db
+      .prepare(
+        `UPDATE partner_locations SET location_name=?,state=?,city=?,district=?,area=?,pin_code=?,location_url=?,
+           duplicate_key=?,status=?,reject_reason='',updated_at=?,updated_by=? WHERE id=?`,
+      )
+      .run(
+        v.name,
+        v.state,
+        v.city,
+        v.district,
+        v.area,
+        v.pin,
+        url,
+        key,
+        LOCATION_STATUS.PENDING,
+        at,
+        account.login_id,
+        row.id,
+      );
+    await audit(account.login_id, resubmit ? "location.resubmit" : "location.partner_edit", { id: row.id, ...v, url });
+    return toDto(await getRow(row.id));
   }
 
-  function removeOwn(account, id) {
-    const row = requireOwnRow(account, id);
+  async function removeOwn(account, id) {
+    const row = await requireOwnRow(account, id);
     if (row.status === LOCATION_STATUS.ACTIVE)
       throw new LocationError(
         409,
         "This location is approved and can no longer be deleted. Contact On The Way Logistics to remove it.",
       );
-    db.prepare("DELETE FROM partner_locations WHERE id=?").run(row.id);
-    audit(account.login_id, "location.partner_delete", { id: row.id, name: row.location_name });
+    await db.prepare("DELETE FROM partner_locations WHERE id=?").run(row.id);
+    await audit(account.login_id, "location.partner_delete", { id: row.id, name: row.location_name });
     return { ok: true, id: row.id };
   }
 
   // A partner sees only the locations they submitted, with their current status.
-  function listOwn(account) {
-    return db
+  async function listOwn(account) {
+    const rows = await db
       .prepare(
         "SELECT * FROM partner_locations WHERE owner_account_id=? ORDER BY created_at DESC",
       )
-      .all(account.id)
-      .map((r) => toDto(r));
+      .all(account.id);
+    return Promise.all(rows.map((r) => toDto(r)));
   }
 
   // ---------- admin side ----------
-  function listAll({ status = "" } = {}) {
+  async function listAll({ status = "" } = {}) {
     const rows = status
-      ? db
+      ? await db
           .prepare(
             "SELECT * FROM partner_locations WHERE status=? ORDER BY created_at DESC",
           )
           .all(status)
-      : db
+      : await db
           .prepare("SELECT * FROM partner_locations ORDER BY created_at DESC")
           .all();
-    return rows.map((r) => toDto(r, { admin: true }));
+    return Promise.all(rows.map((r) => toDto(r, { admin: true })));
   }
 
   // Approve: the location becomes Active and its hub is created in Hub List, in one transaction.
   // Approving again returns the existing hub; it never adds a second one.
-  function approve(id, adminEmail) {
-    const row = requireRow(id);
+  async function approve(id, adminEmail) {
+    const row = await requireRow(id);
     if (row.status === LOCATION_STATUS.ACTIVE) {
-      const hub = hubService.findBySourceLocation(row.id);
+      const hub = await hubService.findBySourceLocation(row.id);
       if (hub) {
-        return { location: toDto(row, { admin: true }), hub, hubCreated: false };
+        return { location: await toDto(row, { admin: true }), hub, hubCreated: false };
       }
     }
-    const result = inTransaction(() => {
-      const current = requireRow(id);
+    const result = await db.transaction(async (tx) => {
+      const current = await requireRow(id, tx);
       // Re-check duplicates: another identical location may have been approved since this one was submitted.
-      if (findDuplicate("", current.duplicate_key, current.id, [LOCATION_STATUS.ACTIVE]))
+      if (await findDuplicate("", current.duplicate_key, current.id, [LOCATION_STATUS.ACTIVE], tx))
         throw new LocationError(
           409,
           "An active location with the same details already exists.",
@@ -507,29 +502,33 @@ export function createLocationService({
           "state",
         );
       const at = now();
-      db.prepare(
-        "UPDATE partner_locations SET status=?,reject_reason='',decided_at=?,decided_by=?,updated_at=?,updated_by=? WHERE id=?",
-      ).run(LOCATION_STATUS.ACTIVE, at, adminEmail, at, adminEmail, id);
+      await tx
+        .prepare(
+          "UPDATE partner_locations SET status=?,reject_reason='',decided_at=?,decided_by=?,updated_at=?,updated_by=? WHERE id=?",
+        )
+        .run(LOCATION_STATUS.ACTIVE, at, adminEmail, at, adminEmail, id);
+      const contact = await verifiedContact(current.owner_account_id, tx);
       return hubService.createFromLocation(
         locationFor(current),
-        verifiedContact(current.owner_account_id),
+        contact,
         adminEmail,
+        tx,
       );
-    });
-    audit(adminEmail, "location.approve", {
+    })();
+    await audit(adminEmail, "location.approve", {
       id,
       hubId: result.hub.id,
       hubCreated: result.created,
     });
     return {
-      location: toDto(getRow(id), { admin: true }),
+      location: await toDto(await getRow(id), { admin: true }),
       hub: result.hub,
       hubCreated: result.created,
     };
   }
 
-  function reject(id, adminEmail, reason = "") {
-    const row = requireRow(id);
+  async function reject(id, adminEmail, reason = "") {
+    const row = await requireRow(id);
     if (row.status === LOCATION_STATUS.REJECTED)
       return toDto(row, { admin: true });
     if (row.status === LOCATION_STATUS.ACTIVE)
@@ -538,25 +537,27 @@ export function createLocationService({
         "An approved location cannot be rejected. Delete it instead; its hub is then set to Inactive.",
       );
     const at = now();
-    db.prepare(
-      "UPDATE partner_locations SET status=?,reject_reason=?,decided_at=?,decided_by=?,updated_at=?,updated_by=? WHERE id=?",
-    ).run(
-      LOCATION_STATUS.REJECTED,
-      clean(reason).slice(0, 300),
-      at,
-      adminEmail,
-      at,
-      adminEmail,
-      id,
-    );
-    audit(adminEmail, "location.reject", { id, reason: clean(reason) });
-    return toDto(getRow(id), { admin: true });
+    await db
+      .prepare(
+        "UPDATE partner_locations SET status=?,reject_reason=?,decided_at=?,decided_by=?,updated_at=?,updated_by=? WHERE id=?",
+      )
+      .run(
+        LOCATION_STATUS.REJECTED,
+        clean(reason).slice(0, 300),
+        at,
+        adminEmail,
+        at,
+        adminEmail,
+        id,
+      );
+    await audit(adminEmail, "location.reject", { id, reason: clean(reason) });
+    return toDto(await getRow(id), { admin: true });
   }
 
   // Edit: send any of the six fields. Blank values are not allowed; the status never changes here.
   // An approved location's hub is updated in the same transaction, so both always agree.
-  function update(id, input = {}, adminEmail) {
-    const row = requireRow(id);
+  async function update(id, input = {}, adminEmail) {
+    const row = await requireRow(id);
     const merged = {
       name: input.name ?? row.location_name,
       state: input.state ?? row.state,
@@ -568,36 +569,38 @@ export function createLocationService({
     const v = validateLocationInput(merged);
     const url = input.url === undefined ? row.location_url || "" : cleanMapUrl(input.url);
     const key = duplicateKey(v);
-    if (key !== row.duplicate_key && findDuplicate("", key, row.id))
+    if (key !== row.duplicate_key && (await findDuplicate("", key, row.id)))
       throw new LocationError(
         409,
         "Another location with these details already exists.",
         "name",
       );
     const at = now();
-    inTransaction(() => {
-      db.prepare(
-        `UPDATE partner_locations SET location_name=?,state=?,city=?,district=?,area=?,pin_code=?,location_url=?,
-           duplicate_key=?,updated_at=?,updated_by=? WHERE id=?`,
-      ).run(v.name, v.state, v.city, v.district, v.area, v.pin, url, key, at, adminEmail, id);
+    await db.transaction(async (tx) => {
+      await tx
+        .prepare(
+          `UPDATE partner_locations SET location_name=?,state=?,city=?,district=?,area=?,pin_code=?,location_url=?,
+             duplicate_key=?,updated_at=?,updated_by=? WHERE id=?`,
+        )
+        .run(v.name, v.state, v.city, v.district, v.area, v.pin, url, key, at, adminEmail, id);
       if (row.status === LOCATION_STATUS.ACTIVE)
-        hubService.syncFromLocation(locationFor(getRow(id)), adminEmail);
-    });
-    audit(adminEmail, "location.edit", { id, ...v, url });
-    return toDto(getRow(id), { admin: true });
+        await hubService.syncFromLocation(locationFor(await getRow(id, tx)), adminEmail);
+    })();
+    await audit(adminEmail, "location.edit", { id, ...v, url });
+    return toDto(await getRow(id), { admin: true });
   }
 
   // Delete: a pending or rejected location is simply removed. An approved location is removed too, but its hub
   // is only set to Inactive (its details are kept), never deleted.
-  function remove(id, adminEmail) {
-    const row = requireRow(id);
+  async function remove(id, adminEmail) {
+    const row = await requireRow(id);
     let hub = null;
-    inTransaction(() => {
+    await db.transaction(async (tx) => {
       if (row.status === LOCATION_STATUS.ACTIVE)
-        hub = hubService.deactivateFromLocation(locationFor(row), adminEmail);
-      db.prepare("DELETE FROM partner_locations WHERE id=?").run(id);
-    });
-    audit(adminEmail, "location.delete", {
+        hub = await hubService.deactivateFromLocation(locationFor(row), adminEmail);
+      await tx.prepare("DELETE FROM partner_locations WHERE id=?").run(id);
+    })();
+    await audit(adminEmail, "location.delete", {
       id,
       name: row.location_name,
       ownerLoginId: row.owner_login_id,
@@ -612,15 +615,17 @@ export function createLocationService({
   }
 
   // Counts for the dashboard header and the partner summary cards.
-  function counts() {
+  async function counts() {
     const out = { pending: 0, active: 0, rejected: 0, total: 0 };
-    for (const r of db
+    const rows = await db
       .prepare("SELECT status, COUNT(*) AS n FROM partner_locations GROUP BY status")
-      .all()) {
-      out.total += r.n;
-      if (r.status === LOCATION_STATUS.PENDING) out.pending = r.n;
-      else if (r.status === LOCATION_STATUS.ACTIVE) out.active = r.n;
-      else if (r.status === LOCATION_STATUS.REJECTED) out.rejected = r.n;
+      .all();
+    for (const r of rows) {
+      const count = Number(r.n) || 0;
+      out.total += count;
+      if (r.status === LOCATION_STATUS.PENDING) out.pending = count;
+      else if (r.status === LOCATION_STATUS.ACTIVE) out.active = count;
+      else if (r.status === LOCATION_STATUS.REJECTED) out.rejected = count;
     }
     return out;
   }
@@ -660,23 +665,23 @@ export function registerLocationRoutes(app, { partnerGuard, adminGuard, service 
   const noStore = (res) => res.set("Cache-Control", "private, no-store");
 
   // Partner (vendor / franchise) routes: each partner only ever sees and submits their own locations.
-  app.get("/api/portal/locations", partnerGuard, (req, res) => {
+  app.get("/api/portal/locations", partnerGuard, async (req, res) => {
     try {
       noStore(res);
       res.json({
         ok: true,
-        locations: service.listOwn(req.account),
-        defaultState: service.defaultState(req.account),
+        locations: await service.listOwn(req.account),
+        defaultState: await service.defaultState(req.account),
       });
     } catch (err) {
       fail(res, err, "Could not load locations:");
     }
   });
 
-  app.post("/api/portal/locations", partnerGuard, (req, res) => {
+  app.post("/api/portal/locations", partnerGuard, async (req, res) => {
     try {
       const body = req.body || {};
-      const out = service.submit(req.account, body, body.submissionKey);
+      const out = await service.submit(req.account, body, body.submissionKey);
       res.status(out.duplicate ? 200 : 201).json({
         ok: true,
         duplicate: out.duplicate,
@@ -690,11 +695,11 @@ export function registerLocationRoutes(app, { partnerGuard, adminGuard, service 
     }
   });
 
-  app.patch("/api/portal/locations/:id", partnerGuard, (req, res) => {
+  app.patch("/api/portal/locations/:id", partnerGuard, async (req, res) => {
     try {
       res.json({
         ok: true,
-        location: service.updateOwn(req.account, req.params.id, req.body || {}),
+        location: await service.updateOwn(req.account, req.params.id, req.body || {}),
         message: "Location updated. It is waiting for Admin Approval.",
       });
     } catch (err) {
@@ -702,32 +707,32 @@ export function registerLocationRoutes(app, { partnerGuard, adminGuard, service 
     }
   });
 
-  app.delete("/api/portal/locations/:id", partnerGuard, (req, res) => {
+  app.delete("/api/portal/locations/:id", partnerGuard, async (req, res) => {
     try {
-      res.json({ ...service.removeOwn(req.account, req.params.id), message: "Location deleted." });
+      res.json({ ...(await service.removeOwn(req.account, req.params.id)), message: "Location deleted." });
     } catch (err) {
       fail(res, err, "Could not delete the location:");
     }
   });
 
   // Admin routes: full list, approve / reject, edit, delete.
-  app.get("/api/admin/locations", adminGuard, (req, res) => {
+  app.get("/api/admin/locations", adminGuard, async (req, res) => {
     try {
       noStore(res);
       const status = typeof req.query.status === "string" ? req.query.status : "";
       res.json({
         ok: true,
-        locations: service.listAll({ status }),
-        counts: service.counts(),
+        locations: await service.listAll({ status }),
+        counts: await service.counts(),
       });
     } catch (err) {
       fail(res, err, "Could not load locations:");
     }
   });
 
-  app.post("/api/admin/locations/:id/approve", adminGuard, (req, res) => {
+  app.post("/api/admin/locations/:id/approve", adminGuard, async (req, res) => {
     try {
-      const out = service.approve(req.params.id, req.adminEmail);
+      const out = await service.approve(req.params.id, req.adminEmail);
       res.json({
         ok: true,
         location: out.location,
@@ -742,11 +747,11 @@ export function registerLocationRoutes(app, { partnerGuard, adminGuard, service 
     }
   });
 
-  app.post("/api/admin/locations/:id/reject", adminGuard, (req, res) => {
+  app.post("/api/admin/locations/:id/reject", adminGuard, async (req, res) => {
     try {
       res.json({
         ok: true,
-        location: service.reject(req.params.id, req.adminEmail, req.body?.reason),
+        location: await service.reject(req.params.id, req.adminEmail, req.body?.reason),
         message: "Location rejected.",
       });
     } catch (err) {
@@ -754,11 +759,11 @@ export function registerLocationRoutes(app, { partnerGuard, adminGuard, service 
     }
   });
 
-  app.patch("/api/admin/locations/:id", adminGuard, (req, res) => {
+  app.patch("/api/admin/locations/:id", adminGuard, async (req, res) => {
     try {
       res.json({
         ok: true,
-        location: service.update(req.params.id, req.body || {}, req.adminEmail),
+        location: await service.update(req.params.id, req.body || {}, req.adminEmail),
         message: "Location updated.",
       });
     } catch (err) {
@@ -766,9 +771,9 @@ export function registerLocationRoutes(app, { partnerGuard, adminGuard, service 
     }
   });
 
-  app.delete("/api/admin/locations/:id", adminGuard, (req, res) => {
+  app.delete("/api/admin/locations/:id", adminGuard, async (req, res) => {
     try {
-      const out = service.remove(req.params.id, req.adminEmail);
+      const out = await service.remove(req.params.id, req.adminEmail);
       res.json({
         ...out,
         message: out.hub
