@@ -1320,10 +1320,13 @@ app.post(
             createdBy ? null : submissionKey || null,
           );
         if (!createdBy)
-          adminNote = await adminNotifications.create({
-            applicationId: id,
-            dashboardBase: publicBase(req),
-          });
+          adminNote = await adminNotifications.create(
+            {
+              applicationId: id,
+              dashboardBase: publicBase(req),
+            },
+            tx,
+          );
       })();
       if (createdBy)
         await audit(createdBy, "partner_application_created", { appId, type });
@@ -1335,7 +1338,7 @@ app.post(
       res.status(201).json({ ok: true, application: responseApplication, confirmationEmail: willEmail });
       if (adminNote?.created) {
         broadcastAdminNotification({ id: adminNote.id, applicationId: id, appId, type, name: payload.name });
-        adminNotifications.sendEmail(adminNote.id, { actor: "system" }).catch((e) => console.error("Admin email:", e.message));
+        await adminNotifications.sendEmail(adminNote.id, { actor: "system" }).catch((e) => console.error("Admin email:", e.message));
       }
       if (!createdBy)
         sendWithRetry(() => emailApplicant(payload, submittedEmail(payload, { supportEmail: SUPPORT_EMAIL })))
@@ -1709,7 +1712,7 @@ async function findApplicationByKey(key) {
   return { ...a, documents: (a.documents || []).map(({ storedName, ...doc }) => doc) };
 }
 
-const adminNotifications = createAdminNotifications({
+const adminNotifications = await createAdminNotifications({
   db,
   transport: { sendMail: (message) => sendSupportMail(message) },
   recipients: () => supportAdminRecipients(),
@@ -1792,8 +1795,20 @@ app.post("/api/admin/notifications/:id/resend-email", adminGuard, async (req, re
   res.json({ ok: !!result?.sent, emailStatus: await adminNotifications.emailStatusOf(id) });
 });
 
-setTimeout(() => adminNotifications.processDue().catch((e) => console.error("Admin email retry:", e.message)), 10_000).unref?.();
-setInterval(() => adminNotifications.processDue().catch((e) => console.error("Admin email retry:", e.message)), 60_000).unref?.();
+setTimeout(async () => {
+  try {
+    await adminNotifications.processDue();
+  } catch (e) {
+    console.error("Admin email retry:", e.message);
+  }
+}, 10_000).unref?.();
+setInterval(async () => {
+  try {
+    await adminNotifications.processDue();
+  } catch (e) {
+    console.error("Admin email retry:", e.message);
+  }
+}, 60_000).unref?.();
 
 // ---------- Vendor / Franchise portal data ----------
 const portalGuard = (req, res, next) => {
