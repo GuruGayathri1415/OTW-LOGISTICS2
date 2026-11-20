@@ -7,7 +7,6 @@
 //   - a vendor can decide only on the riders it registered;
 //   - a franchise cannot decide on anything (it sees the status and the admin's remarks only).
 //
-// This file has no web-framework dependency, so its rules can be tested directly against SQLite.
 // rider-registration-routes.js exposes it over HTTP.
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -204,15 +203,15 @@ export function checkDocuments(files = {}) {
 }
 
 const isUniqueViolation = (err) =>
-  /UNIQUE constraint failed/.test(String(err?.message || ""));
+  err?.code === "23505" || /UNIQUE constraint failed|duplicate key/i.test(String(err?.message || ""));
 
-export function createRiderRegistrationService({
+export async function createRiderRegistrationService({
   db,
   uploadDir,
   audit = () => {},
   now = () => new Date().toISOString(),
 }) {
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS rider_registrations(
       id TEXT PRIMARY KEY,
       application_id TEXT NOT NULL UNIQUE,
@@ -249,7 +248,7 @@ export function createRiderRegistrationService({
       ON rider_registrations(rider_key) WHERE application_status <> 'REJECTED';
     CREATE INDEX IF NOT EXISTS rider_registrations_owner ON rider_registrations(owner_account_id, registration_source);
     CREATE TABLE IF NOT EXISTS rider_registration_history(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id BIGSERIAL PRIMARY KEY,
       registration_id TEXT NOT NULL,
       from_status TEXT,
       to_status TEXT NOT NULL,
@@ -262,19 +261,22 @@ export function createRiderRegistrationService({
     CREATE TABLE IF NOT EXISTS rider_registration_counter(id INTEGER PRIMARY KEY CHECK (id = 1), last INTEGER NOT NULL);
     INSERT INTO rider_registration_counter(id, last) VALUES(1, 0) ON CONFLICT(id) DO NOTHING;
   `);
+
   // Databases created before these columns existed get them added (existing records keep their values).
-  const existingColumns = new Set(
-    db
-      .prepare("PRAGMA table_info(rider_registrations)")
-      .all()
-      .map((c) => c.name),
-  );
+  const columnRows = await db
+    .prepare(
+      `SELECT column_name AS name
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'rider_registrations'`,
+    )
+    .all();
+  const existingColumns = new Set(columnRows.map((c) => c.name));
   if (!existingColumns.has("owner_name"))
-    db.exec(
+    await db.exec(
       "ALTER TABLE rider_registrations ADD COLUMN owner_name TEXT NOT NULL DEFAULT ''",
     );
   if (!existingColumns.has("decision_remarks"))
-    db.exec("ALTER TABLE rider_registrations ADD COLUMN decision_remarks TEXT");
+    await db.exec("ALTER TABLE rider_registrations ADD COLUMN decision_remarks TEXT");
 
   const statements = {
     byId: db.prepare("SELECT * FROM rider_registrations WHERE id = ?"),
@@ -308,26 +310,16 @@ export function createRiderRegistrationService({
     ),
   };
 
-  // Runs fn inside one database transaction (manual BEGIN so it works the same on every SQLite driver).
-  function inTransaction(fn) {
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = fn();
-      db.exec("COMMIT");
-      return result;
-    } catch (err) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {
-        /* nothing to roll back */
-      }
-      throw err;
-    }
-  }
+  const runTx = db.transaction(async (tx, fn) => fn(tx));
 
-  function nextApplicationId() {
-    statements.bumpCounter.run();
-    return "RM-" + String(statements.readCounter.get().last).padStart(6, "0");
+  async function nextApplicationId(tx = db) {
+    await tx
+      .prepare("UPDATE rider_registration_counter SET last = last + 1 WHERE id = 1")
+      .run();
+    const row = await tx
+      .prepare("SELECT last FROM rider_registration_counter WHERE id = 1")
+      .get();
+    return "RM-" + String(row.last).padStart(6, "0");
   }
 
   function assertActor(actor) {
@@ -347,7 +339,7 @@ export function createRiderRegistrationService({
     };
   }
 
-  function visibleRow(actor, id) {
+  async function visibleRow(actor, id) {
     const scope = scopeFor(actor);
     return db
       .prepare(
@@ -413,31 +405,32 @@ export function createRiderRegistrationService({
     return out;
   }
 
-  function list(actor) {
+  async function list(actor) {
     assertActor(actor);
     const scope = scopeFor(actor);
-    return db
+    const rows = await db
       .prepare(
         `SELECT * FROM rider_registrations WHERE ${scope.sql} ORDER BY created_at DESC, application_id DESC`,
       )
-      .all(...scope.params)
-      .map((row) => forViewer(actor, toPublic(row)));
+      .all(...scope.params);
+    return rows.map((row) => forViewer(actor, toPublic(row)));
   }
 
-  function get(actor, id) {
+  async function get(actor, id) {
     assertActor(actor);
-    const row = visibleRow(actor, id);
+    const row = await visibleRow(actor, id);
     if (!row) throw new RegistrationError(404, "Rider application not found.");
-    return forViewer(actor, toPublic(row, statements.historyFor.all(row.id)));
+    const history = await statements.historyFor.all(row.id);
+    return forViewer(actor, toPublic(row, history));
   }
 
   // files: {selfie: {buffer, originalname}, aadhaar: {buffer, originalname}} as read by multer.
-  function create(actor, rawFields, files) {
+  async function create(actor, rawFields, files) {
     assertActor(actor);
     const fields = validateRegistrationFields(rawFields);
     const docs = checkDocuments(files);
     const identity = String(actor.identity || actor.role);
-    const liveNow = statements.liveByRider.get(fields.riderKey, "");
+    const liveNow = await statements.liveByRider.get(fields.riderKey, "");
     if (liveNow) throw duplicateError(fields, liveNow);
 
     const id = crypto.randomUUID();
@@ -462,57 +455,71 @@ export function createRiderRegistrationService({
       const ownerName = owner
         ? String(actor.ownerName || actor.identity || "").slice(0, 100)
         : "";
-      inTransaction(() => {
-        const clash = statements.liveByRider.get(fields.riderKey, "");
+      await runTx(async (tx) => {
+        const clash = await tx
+          .prepare(
+            "SELECT id, application_id FROM rider_registrations WHERE rider_key = ? AND application_status <> 'REJECTED' AND id <> ?",
+          )
+          .get(fields.riderKey, "");
         if (clash) throw duplicateError(fields, clash);
-        const applicationId = nextApplicationId();
-        statements.insert.run(
-          id,
-          applicationId,
-          fields.riderId,
-          fields.riderKey,
-          fields.riderName,
-          fields.mobileNumber,
-          fields.hubPincode,
-          fields.hubLocation,
-          stored.selfie,
-          docs.selfie.name,
-          docs.selfie.type,
-          docs.selfie.size,
-          stored.aadhaar,
-          docs.aadhaar.name,
-          docs.aadhaar.type,
-          docs.aadhaar.size,
-          SOURCE_BY_ROLE[actor.role],
-          owner?.accountId || null,
-          owner ? identity : null,
-          ownerName,
-          identity,
-          "PENDING",
-          null,
-          null,
-          null,
-          null,
-          stamp,
-          stamp,
-        );
-        statements.insertHistory.run(
-          id,
-          null,
-          "PENDING",
-          "Registration submitted",
-          identity,
-          actor.role,
-          stamp,
-        );
+        const applicationId = await nextApplicationId(tx);
+        await tx
+          .prepare(`INSERT INTO rider_registrations(id, application_id, rider_id, rider_key, rider_name, mobile_number, hub_pincode, hub_location,
+            selfie_path, selfie_name, selfie_type, selfie_size, aadhaar_path, aadhaar_name, aadhaar_type, aadhaar_size,
+            registration_source, owner_account_id, owner_login_id, owner_name, created_by, application_status, rejection_remarks,
+            decision_remarks, approved_by, approval_date, created_at, updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(
+            id,
+            applicationId,
+            fields.riderId,
+            fields.riderKey,
+            fields.riderName,
+            fields.mobileNumber,
+            fields.hubPincode,
+            fields.hubLocation,
+            stored.selfie,
+            docs.selfie.name,
+            docs.selfie.type,
+            docs.selfie.size,
+            stored.aadhaar,
+            docs.aadhaar.name,
+            docs.aadhaar.type,
+            docs.aadhaar.size,
+            SOURCE_BY_ROLE[actor.role],
+            owner?.accountId || null,
+            owner ? identity : null,
+            ownerName,
+            identity,
+            "PENDING",
+            null,
+            null,
+            null,
+            null,
+            stamp,
+            stamp,
+          );
+        await tx
+          .prepare(`INSERT INTO rider_registration_history(registration_id, from_status, to_status, remarks, actor, actor_role, created_at)
+            VALUES(?,?,?,?,?,?,?)`)
+          .run(
+            id,
+            null,
+            "PENDING",
+            "Registration submitted",
+            identity,
+            actor.role,
+            stamp,
+          );
       });
-      const row = statements.byId.get(id);
-      audit(identity, "rider_registration_created", {
+      const row = await statements.byId.get(id);
+      await audit(identity, "rider_registration_created", {
         applicationId: row.application_id,
         riderId: row.rider_id,
         source: row.registration_source,
       });
-      return toPublic(row, statements.historyFor.all(id));
+      const history = await statements.historyFor.all(id);
+      return toPublic(row, history);
     } catch (err) {
       fs.rmSync(dir, { recursive: true, force: true }); // nothing was saved, so remove the files of this attempt
       if (err instanceof RegistrationError) throw err;
@@ -537,17 +544,17 @@ export function createRiderRegistrationService({
 
   // Approve or reject. Any change of status is kept in the history with who made it, when and the remarks.
   // Admin-only edits. Omitted document uploads keep the existing private files.
-  function update(actor, id, rawFields = {}, files = {}) {
+  async function update(actor, id, rawFields = {}, files = {}) {
     assertActor(actor);
     if (actor.role !== "admin")
       throw new RegistrationError(
         403,
         "Only the admin can edit an active rider profile.",
       );
-    const row = visibleRow(actor, id);
+    const row = await visibleRow(actor, id);
     if (!row) throw new RegistrationError(404, "Rider application not found.");
     const fields = validateRegistrationFields(rawFields);
-    const clash = statements.liveByRider.get(fields.riderKey, row.id);
+    const clash = await statements.liveByRider.get(fields.riderKey, row.id);
     if (clash)
       throw new RegistrationError(
         409,
@@ -612,32 +619,40 @@ export function createRiderRegistrationService({
     const stamp = now(),
       identity = String(actor.identity || actor.role);
     try {
-      inTransaction(() => {
-        const latestClash = statements.liveByRider.get(fields.riderKey, row.id);
+      await runTx(async (tx) => {
+        const latestClash = await tx
+          .prepare(
+            "SELECT id, application_id FROM rider_registrations WHERE rider_key = ? AND application_status <> 'REJECTED' AND id <> ?",
+          )
+          .get(fields.riderKey, row.id);
         if (latestClash)
           throw new RegistrationError(
             409,
             `Rider ID ${fields.riderId} is already assigned to another live rider.`,
             "riderId",
           );
-        statements.updateDetails.run(
-          fields.riderId,
-          fields.riderKey,
-          fields.riderName,
-          fields.mobileNumber,
-          fields.hubPincode,
-          fields.hubLocation,
-          next.selfie_path,
-          next.selfie_name,
-          next.selfie_type,
-          next.selfie_size,
-          next.aadhaar_path,
-          next.aadhaar_name,
-          next.aadhaar_type,
-          next.aadhaar_size,
-          stamp,
-          row.id,
-        );
+        await tx
+          .prepare(`UPDATE rider_registrations SET rider_id = ?, rider_key = ?, rider_name = ?, mobile_number = ?,
+            hub_pincode = ?, hub_location = ?, selfie_path = ?, selfie_name = ?, selfie_type = ?, selfie_size = ?,
+            aadhaar_path = ?, aadhaar_name = ?, aadhaar_type = ?, aadhaar_size = ?, updated_at = ? WHERE id = ?`)
+          .run(
+            fields.riderId,
+            fields.riderKey,
+            fields.riderName,
+            fields.mobileNumber,
+            fields.hubPincode,
+            fields.hubLocation,
+            next.selfie_path,
+            next.selfie_name,
+            next.selfie_type,
+            next.selfie_size,
+            next.aadhaar_path,
+            next.aadhaar_name,
+            next.aadhaar_type,
+            next.aadhaar_size,
+            stamp,
+            row.id,
+          );
       });
     } catch (err) {
       for (const f of written)
@@ -652,7 +667,7 @@ export function createRiderRegistrationService({
         );
       throw err;
     }
-    audit(identity, "rider_registration_updated", {
+    await audit(identity, "rider_registration_updated", {
       riderId: fields.riderId,
       previousRiderId: row.rider_id,
       status: row.application_status,
@@ -660,7 +675,7 @@ export function createRiderRegistrationService({
     return get(actor, row.id);
   }
 
-  function setStatus(actor, id, input = {}) {
+  async function setStatus(actor, id, input = {}) {
     assertActor(actor);
     if (!REG_DECIDER_ROLES.includes(actor.role)) {
       throw new RegistrationError(
@@ -686,7 +701,7 @@ export function createRiderRegistrationService({
         "Enter the reason for rejecting this application.",
         "remarks",
       );
-    const row = visibleRow(actor, id);
+    const row = await visibleRow(actor, id);
     if (!row) throw new RegistrationError(404, "Rider application not found.");
     if (row.application_status === target)
       throw new RegistrationError(
@@ -695,9 +710,13 @@ export function createRiderRegistrationService({
       );
     const identity = String(actor.identity || actor.role);
     const stamp = now();
-    inTransaction(() => {
+    await runTx(async (tx) => {
       if (target !== "REJECTED") {
-        const clash = statements.liveByRider.get(row.rider_key, row.id);
+        const clash = await tx
+          .prepare(
+            "SELECT id, application_id FROM rider_registrations WHERE rider_key = ? AND application_status <> 'REJECTED' AND id <> ?",
+          )
+          .get(row.rider_key, row.id);
         if (clash) {
           throw new RegistrationError(
             409,
@@ -706,26 +725,32 @@ export function createRiderRegistrationService({
           );
         }
       }
-      statements.updateStatus.run(
-        target,
-        target === "REJECTED" ? remarks : null,
-        target === "PENDING" ? null : remarks || null,
-        target === "APPROVED" ? identity : null,
-        target === "APPROVED" ? stamp : null,
-        stamp,
-        row.id,
-      );
-      statements.insertHistory.run(
-        row.id,
-        row.application_status,
-        target,
-        remarks || null,
-        identity,
-        actor.role,
-        stamp,
-      );
+      await tx
+        .prepare(`UPDATE rider_registrations SET application_status = ?, rejection_remarks = ?, decision_remarks = ?,
+          approved_by = ?, approval_date = ?, updated_at = ? WHERE id = ?`)
+        .run(
+          target,
+          target === "REJECTED" ? remarks : null,
+          target === "PENDING" ? null : remarks || null,
+          target === "APPROVED" ? identity : null,
+          target === "APPROVED" ? stamp : null,
+          stamp,
+          row.id,
+        );
+      await tx
+        .prepare(`INSERT INTO rider_registration_history(registration_id, from_status, to_status, remarks, actor, actor_role, created_at)
+          VALUES(?,?,?,?,?,?,?)`)
+        .run(
+          row.id,
+          row.application_status,
+          target,
+          remarks || null,
+          identity,
+          actor.role,
+          stamp,
+        );
     });
-    audit(identity, "rider_registration_" + target.toLowerCase(), {
+    await audit(identity, "rider_registration_" + target.toLowerCase(), {
       applicationId: row.application_id,
       riderId: row.rider_id,
       from: row.application_status,
@@ -735,10 +760,10 @@ export function createRiderRegistrationService({
   }
 
   // Path of a stored document, if this account may see that registration. Aadhaar views are audited.
-  function fileFor(actor, id, kind) {
+  async function fileFor(actor, id, kind) {
     assertActor(actor);
     if (!DOCUMENTS[kind]) throw new RegistrationError(404, "File not found.");
-    const row = visibleRow(actor, id);
+    const row = await visibleRow(actor, id);
     if (!row) throw new RegistrationError(404, "File not found.");
     const rel = kind === "selfie" ? row.selfie_path : row.aadhaar_path;
     const root = path.resolve(uploadDir);
@@ -750,7 +775,7 @@ export function createRiderRegistrationService({
       );
     }
     if (kind === "aadhaar") {
-      audit(String(actor.identity || actor.role), "rider_aadhaar_viewed", {
+      await audit(String(actor.identity || actor.role), "rider_aadhaar_viewed", {
         applicationId: row.application_id,
         riderId: row.rider_id,
       });
