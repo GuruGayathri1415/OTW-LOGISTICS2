@@ -1,7 +1,7 @@
 // Payment Management: the Weekly Payments table (Admin Portal only).
 //
-// Every imported Excel row is stored in the `weekly_payments` table of the same SQLite database as the rest of the
-// backend, one row per rider per week. The weekly amount is stored exactly as read from the Excel sheet (the original
+// Every imported Excel row is stored in the `weekly_payments` table of the PostgreSQL database,
+// one row per rider per week. The weekly amount is stored exactly as read from the Excel sheet (the original
 // text of the cell is kept too), separately for each rider and week.
 //
 // Duplicate rule: permanent Rider ID + exact payment period for verified riders; a stable provisional key
@@ -168,16 +168,16 @@ export function resolveRiders(
   return { records: out, review, corrections };
 }
 
-export function createWeeklyPaymentService({
+export async function createWeeklyPaymentService({
   db,
-  audit = () => {},
+  audit = async () => {},
   riderRegistry = false,
   // Called after rows were added or changed (import, Admin mapping, re-check after a rider approval):
   // ({importId, fileName, inserted, updated}). Used by the server to notify the partners concerned.
   onSaved = null,
 }) {
-  db.exec(`CREATE TABLE IF NOT EXISTS weekly_payments(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+  await db.exec(`CREATE TABLE IF NOT EXISTS weekly_payments(
+    id BIGSERIAL PRIMARY KEY,
     rider_key TEXT NOT NULL,
     week_key TEXT NOT NULL,
     name_key TEXT NOT NULL DEFAULT '',
@@ -211,8 +211,8 @@ export function createWeeklyPaymentService({
   );`);
 
   // Rows that could not be verified against Rider Registration. They are kept here for Admin review, not discarded.
-  db.exec(`CREATE TABLE IF NOT EXISTS weekly_payment_pending(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+  await db.exec(`CREATE TABLE IF NOT EXISTS weekly_payment_pending(
+    id BIGSERIAL PRIMARY KEY,
     pending_key TEXT NOT NULL UNIQUE,
     excel_rider_id TEXT NOT NULL DEFAULT '',
     rider_name TEXT NOT NULL,
@@ -229,7 +229,7 @@ export function createWeeklyPaymentService({
     updated_at TEXT NOT NULL
   )`);
   // Explicit Admin mappings persist across later imports, so a rider mapped once is not mapped again.
-  db.exec(`CREATE TABLE IF NOT EXISTS weekly_payment_rider_mappings(
+  await db.exec(`CREATE TABLE IF NOT EXISTS weekly_payment_rider_mappings(
     mapping_key TEXT PRIMARY KEY,
     excel_rider_id TEXT NOT NULL DEFAULT '',
     excel_rider_name TEXT NOT NULL,
@@ -237,7 +237,7 @@ export function createWeeklyPaymentService({
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`);
-  db.exec(`CREATE TABLE IF NOT EXISTS weekly_payment_provisional_riders(
+  await db.exec(`CREATE TABLE IF NOT EXISTS weekly_payment_provisional_riders(
     mapping_key TEXT PRIMARY KEY,
     excel_rider_id TEXT NOT NULL DEFAULT '',
     rider_name TEXT NOT NULL,
@@ -247,16 +247,20 @@ export function createWeeklyPaymentService({
     updated_at TEXT NOT NULL,
     verified_rider_id TEXT NOT NULL DEFAULT ''
   )`);
-  const existingColumns = new Set(
-    db
-      .prepare("PRAGMA table_info(weekly_payments)")
-      .all()
-      .map((c) => c.name),
-  );
+
+  const colRows = await db
+    .prepare(
+      `SELECT column_name AS name
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'weekly_payments'`,
+    )
+    .all();
+  const existingColumns = new Set(colRows.map((c) => c.name));
+
   // Payment status (PENDING / PROCESSING / PAID / FAILED) is set only by the Admin. Excel imports never write this
   // column, so a re-import keeps the status already saved for each rider-week.
   if (!existingColumns.has("payment_status"))
-    db.exec(
+    await db.exec(
       "ALTER TABLE weekly_payments ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'PENDING'",
     );
   for (const [name, type] of [
@@ -272,7 +276,7 @@ export function createWeeklyPaymentService({
     ["rate_sdd", "REAL"],
   ]) {
     if (!existingColumns.has(name))
-      db.exec(`ALTER TABLE weekly_payments ADD COLUMN ${name} ${type}`);
+      await db.exec(`ALTER TABLE weekly_payments ADD COLUMN ${name} ${type}`);
   }
 
   const selectOne = db.prepare(
@@ -377,6 +381,7 @@ export function createWeeklyPaymentService({
       ],
     };
   }
+
   const same = (row, values) => {
     // values order = VALUE_COLUMNS: label, dates, rider, IDs, daily totals, category counts/amounts, total amount, source metadata, rates.
     // Source metadata (file, sheet, row, original cells) is not compared, so re-importing the same figures is "unchanged".
@@ -407,9 +412,9 @@ export function createWeeklyPaymentService({
     return cur.every((c, i) => (c ?? null) === (want[i] ?? null));
   };
 
-  function liveRegistrations() {
+  async function liveRegistrations(executor = db) {
     try {
-      return db
+      return await executor
         .prepare(
           "SELECT rider_id, rider_key, rider_name FROM rider_registrations WHERE application_status = 'APPROVED'",
         )
@@ -418,6 +423,7 @@ export function createWeeklyPaymentService({
       return [];
     } // the registration table does not exist yet: no rider can be verified
   }
+
   const mappingKeyOf = (r) =>
     normalizeRiderName(r.riderName) + "|" + normalizeRiderKey(r.riderId);
   const provisionalKeyFor = (name, riderId) =>
@@ -434,26 +440,30 @@ export function createWeeklyPaymentService({
     r.weekKey +
     "|" +
     normalizeRiderKey(r.riderId);
-  const upsertPending =
-    db.prepare(`INSERT INTO weekly_payment_pending(pending_key, excel_rider_id, rider_name, week_key, week_label, week_start, week_end, payload, reason, file_name, status, mapped_rider_id, created_at, updated_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING','',?,?)
-    ON CONFLICT(pending_key) DO UPDATE SET payload = excluded.payload, reason = excluded.reason, file_name = excluded.file_name, status = 'PENDING', updated_at = excluded.updated_at`);
+
+  const upsertPending = db.prepare(
+    `INSERT INTO weekly_payment_pending(pending_key, excel_rider_id, rider_name, week_key, week_label, week_start, week_end, payload, reason, file_name, status, mapped_rider_id, created_at, updated_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING','',?,?)
+     ON CONFLICT(pending_key) DO UPDATE SET payload = excluded.payload, reason = excluded.reason, file_name = excluded.file_name, status = 'PENDING', updated_at = excluded.updated_at`,
+  );
   const setPendingReason = db.prepare(
     "UPDATE weekly_payment_pending SET reason = ?, updated_at = ? WHERE id = ?",
   );
   const setPendingImported = db.prepare(
     "UPDATE weekly_payment_pending SET status = 'IMPORTED', mapped_rider_id = ?, reason = 'Imported', updated_at = ? WHERE id = ?",
   );
-  const pendingRows = () =>
-    db
+
+  async function pendingRows(executor = db) {
+    return executor
       .prepare(
-        "SELECT * FROM weekly_payment_pending WHERE status = 'PENDING' ORDER BY week_start, rider_name COLLATE NOCASE",
+        "SELECT * FROM weekly_payment_pending WHERE status = 'PENDING' ORDER BY week_start, LOWER(rider_name), id",
       )
       .all();
+  }
 
   // The one import path. Verified rows are saved; unverified rows are kept as pending; pending rows are re-checked
   // against the current registrations and imported when they now verify. Nothing is rejected as a whole.
-  function applyRecords(
+  async function applyRecords(
     records,
     { fileName, fileHash, actor, recordImport = true },
   ) {
@@ -468,20 +478,21 @@ export function createWeeklyPaymentService({
       pendingReview = [],
       pendingResolved = [];
     if (riderRegistry) {
-      const regs = liveRegistrations();
+      const regs = await liveRegistrations();
       registeredCount = regs.length;
-      const pend = pendingRows().map((p) => ({
+      const rawPending = await pendingRows();
+      const pend = rawPending.map((p) => ({
         ...JSON.parse(p.payload),
         pendingId: p.id,
         mappedRiderId: p.mapped_rider_id || "",
       }));
+      const mappingRows = await db
+        .prepare(
+          "SELECT mapping_key, registered_rider_id FROM weekly_payment_rider_mappings",
+        )
+        .all();
       const savedMappings = new Map(
-        db
-          .prepare(
-            "SELECT mapping_key, registered_rider_id FROM weekly_payment_rider_mappings",
-          )
-          .all()
-          .map((x) => [x.mapping_key, x.registered_rider_id]),
+        mappingRows.map((x) => [x.mapping_key, x.registered_rider_id]),
       );
       const resolved = resolveRiders(
         [...pend, ...records],
@@ -538,7 +549,8 @@ export function createWeeklyPaymentService({
 
     const conflicts = [];
     for (const p of unique.values()) {
-      for (const old of selectByNameAll.all(p.weekKey, p.nameKey)) {
+      const oldRows = await selectByNameAll.all(p.weekKey, p.nameKey);
+      for (const old of oldRows) {
         if (old.rider_key !== p.riderKey)
           conflicts.push({
             rider: old.rider_name,
@@ -552,7 +564,7 @@ export function createWeeklyPaymentService({
     const importId = crypto.randomUUID(),
       now = new Date().toISOString();
     const previous = fileHash
-      ? db
+      ? await db
           .prepare(
             "SELECT file_name, imported_at FROM weekly_payment_imports WHERE file_hash = ? ORDER BY imported_at DESC LIMIT 1",
           )
@@ -564,12 +576,36 @@ export function createWeeklyPaymentService({
       amountTotalPaise = 0;
     const weeks = new Map(),
       touched = new Set();
-    db.exec("BEGIN");
-    try {
+
+    await db.transaction(async (tx) => {
+      const txSelectOne = tx.prepare(
+        "SELECT * FROM weekly_payments WHERE rider_key = ? AND week_key = ?",
+      );
+      const txInsertRow = tx.prepare(
+        `INSERT INTO weekly_payments(${COLUMNS.join(",")},import_id,created_at,updated_at) VALUES(${COLUMNS.map(() => "?").join(",")},?,?,?)`,
+      );
+      const txUpdateRow = tx.prepare(
+        `UPDATE weekly_payments SET name_key = ?, ${VALUE_COLUMNS.map((c) => c + " = ?").join(", ")}, import_id = ?, updated_at = ? WHERE id = ?`,
+      );
+      const txUpsertPending = tx.prepare(
+        `INSERT INTO weekly_payment_pending(pending_key, excel_rider_id, rider_name, week_key, week_label, week_start, week_end, payload, reason, file_name, status, mapped_rider_id, created_at, updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING','',?,?)
+         ON CONFLICT(pending_key) DO UPDATE SET payload = excluded.payload, reason = excluded.reason, file_name = excluded.file_name, status = 'PENDING', updated_at = excluded.updated_at`,
+      );
+      const txSetPendingReason = tx.prepare(
+        "UPDATE weekly_payment_pending SET reason = ?, updated_at = ? WHERE id = ?",
+      );
+      const txSetPendingImported = tx.prepare(
+        "UPDATE weekly_payment_pending SET status = 'IMPORTED', mapped_rider_id = ?, reason = 'Imported', updated_at = ? WHERE id = ?",
+      );
+      const txInsertImport = tx.prepare(
+        "INSERT INTO weekly_payment_imports(id,file_name,file_hash,imported_at,imported_by,total,inserted,updated,unchanged,amount_total,weeks) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+      );
+
       // When an Admin maps a pending rider, remove that rider's provisional weekly keys before
       // saving under the permanent registered Rider ID. This prevents two rows for the same week.
       for (const r of pendingResolved) {
-        const sourcePending = db
+        const sourcePending = await tx
           .prepare(
             "SELECT rider_name, excel_rider_id FROM weekly_payment_pending WHERE id = ?",
           )
@@ -579,17 +615,19 @@ export function createWeeklyPaymentService({
             sourcePending.rider_name,
             sourcePending.excel_rider_id,
           );
-          db.prepare(
-            "DELETE FROM weekly_payments WHERE rider_key = ? AND week_key = ?",
-          ).run(oldKey, r.weekKey);
+          await tx
+            .prepare(
+              "DELETE FROM weekly_payments WHERE rider_key = ? AND week_key = ?",
+            )
+            .run(oldKey, r.weekKey);
         }
       }
       for (const p of unique.values()) {
-        let row = selectOne.get(p.riderKey, p.weekKey);
+        let row = await txSelectOne.get(p.riderKey, p.weekKey);
         if (row && touched.has(row.id)) row = null;
         if (row && !p.values[4]) p.values[4] = row.rider_id; // never blank out a Rider ID that is already saved
         if (!row) {
-          insertRow.run(
+          await txInsertRow.run(
             p.riderKey,
             p.weekKey,
             p.nameKey,
@@ -603,7 +641,7 @@ export function createWeeklyPaymentService({
           unchanged++;
           touched.add(row.id);
         } else {
-          updateRow.run(p.nameKey, ...p.values, importId, now, row.id);
+          await txUpdateRow.run(p.nameKey, ...p.values, importId, now, row.id);
           updated++;
           touched.add(row.id);
         }
@@ -611,12 +649,13 @@ export function createWeeklyPaymentService({
           p.values[15] === null ? 0 : Math.round(p.values[15] * 100);
         weeks.set(p.weekKey, p.values[0]);
       }
-      const upsertProvisional =
-        db.prepare(`INSERT INTO weekly_payment_provisional_riders(mapping_key,excel_rider_id,rider_name,status,reason,first_seen_at,updated_at,verified_rider_id)
-        VALUES(?,?,?,'PENDING_VERIFICATION',?,?,?,'')
-        ON CONFLICT(mapping_key) DO UPDATE SET reason=excluded.reason,updated_at=excluded.updated_at`);
+      const upsertProvisional = tx.prepare(
+        `INSERT INTO weekly_payment_provisional_riders(mapping_key,excel_rider_id,rider_name,status,reason,first_seen_at,updated_at,verified_rider_id)
+         VALUES(?,?,?,'PENDING_VERIFICATION',?,?,?,'')
+         ON CONFLICT(mapping_key) DO UPDATE SET reason=excluded.reason,updated_at=excluded.updated_at`,
+      );
       for (const x of [...review, ...pendingReview]) {
-        upsertProvisional.run(
+        await upsertProvisional.run(
           mappingKeyOf(x.record),
           normalizeRiderKey(x.record.riderId),
           clean(x.record.riderName).slice(0, 200),
@@ -626,7 +665,7 @@ export function createWeeklyPaymentService({
         );
       }
       for (const x of review) {
-        upsertPending.run(
+        await txUpsertPending.run(
           pendingKeyOf(x.record),
           normalizeRiderKey(x.record.riderId),
           clean(x.record.riderName).slice(0, 200),
@@ -642,21 +681,21 @@ export function createWeeklyPaymentService({
         );
       }
       for (const x of pendingReview)
-        setPendingReason.run(x.reason, now, x.record.pendingId);
+        await txSetPendingReason.run(x.reason, now, x.record.pendingId);
       for (const r of pendingResolved)
-        setPendingImported.run(r.riderId, now, r.pendingId);
+        await txSetPendingImported.run(r.riderId, now, r.pendingId);
       if (pendingResolved.length) {
-        const updateProvisional = db.prepare(
+        const updateProvisional = tx.prepare(
           `UPDATE weekly_payment_provisional_riders SET status='VERIFIED',verified_rider_id=?,updated_at=? WHERE mapping_key=?`,
         );
         for (const r of pendingResolved) {
-          const sourcePending = db
+          const sourcePending = await tx
             .prepare(
               "SELECT rider_name, excel_rider_id FROM weekly_payment_pending WHERE id = ?",
             )
             .get(r.pendingId);
           if (sourcePending)
-            updateProvisional.run(
+            await updateProvisional.run(
               r.riderId,
               now,
               normalizeRiderName(sourcePending.rider_name) +
@@ -666,7 +705,7 @@ export function createWeeklyPaymentService({
         }
       }
       if (recordImport)
-        insertImport.run(
+        await txInsertImport.run(
           importId,
           fileName.slice(0, 200),
           fileHash,
@@ -679,25 +718,21 @@ export function createWeeklyPaymentService({
           amountTotalPaise / 100,
           JSON.stringify([...weeks.values()]),
         );
-      db.exec("COMMIT");
-    } catch (err) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {
-        /* already rolled back */
-      }
-      throw err;
-    }
+    })();
+
     if (onSaved && (inserted || updated)) {
       try {
-        onSaved({ importId, fileName, inserted, updated });
+        await onSaved({ importId, fileName, inserted, updated });
       } catch (err) {
-        console.error("Weekly payments were saved, but the follow-up step failed:", err && err.message);
+        console.error(
+          "Weekly payments were saved, but the follow-up step failed:",
+          err && err.message,
+        );
       }
     }
-    const pendingTotal = pendingRows().length;
+    const pendingTotal = (await pendingRows()).length;
     if (recordImport)
-      audit(actor, "weekly_payments_import", {
+      await audit(actor, "weekly_payments_import", {
         fileName,
         records: unique.size,
         inserted,
@@ -709,7 +744,7 @@ export function createWeeklyPaymentService({
         corrections: corrections.length,
       });
     else if (pendingVerified || inserted || updated)
-      audit(actor, "weekly_payments_rechecked", {
+      await audit(actor, "weekly_payments_rechecked", {
         pendingVerified,
         inserted,
         updated,
@@ -740,7 +775,7 @@ export function createWeeklyPaymentService({
     };
   }
 
-  function importRecords(body, actor = "") {
+  async function importRecords(body, actor = "") {
     const records = body?.records;
     if (!Array.isArray(records) || !records.length)
       throw new WeeklyPaymentError(400, "There are no payment rows to save.");
@@ -755,8 +790,8 @@ export function createWeeklyPaymentService({
   }
 
   // Lists the rows waiting for Admin review, with the registrations to choose from.
-  function listPending() {
-    const regs = liveRegistrations()
+  async function listPending() {
+    const regs = (await liveRegistrations())
       .slice()
       .sort((a, b) => String(a.rider_name).localeCompare(String(b.rider_name)));
     const sheetOrder = (a, b) =>
@@ -765,7 +800,8 @@ export function createWeeklyPaymentService({
       String(a.sheet || "").localeCompare(String(b.sheet || "")) ||
       (a.rowNumber ?? 0) - (b.rowNumber ?? 0) ||
       a.id - b.id;
-    const pending = pendingRows()
+    const currentPending = await pendingRows();
+    const pending = currentPending
       .map((p) => {
         const d = JSON.parse(p.payload);
         return {
@@ -808,21 +844,22 @@ export function createWeeklyPaymentService({
         ),
       )
       .map(({ weekStartSort, id_, ...row }) => ({ ...row, id: id_ }));
-    const provisionalRiders = db
+
+    const provRows = await db
       .prepare(
         `SELECT mapping_key,excel_rider_id,rider_name,status,reason,first_seen_at,updated_at
-      FROM weekly_payment_provisional_riders WHERE status='PENDING_VERIFICATION' ORDER BY rider_name COLLATE NOCASE`,
+         FROM weekly_payment_provisional_riders WHERE status='PENDING_VERIFICATION' ORDER BY LOWER(rider_name)`,
       )
-      .all()
-      .map((r) => ({
-        mappingKey: r.mapping_key,
-        excelRiderId: r.excel_rider_id,
-        rider: r.rider_name,
-        status: r.status,
-        reason: r.reason,
-        createdAt: r.first_seen_at,
-        updatedAt: r.updated_at,
-      }));
+      .all();
+    const provisionalRiders = provRows.map((r) => ({
+      mappingKey: r.mapping_key,
+      excelRiderId: r.excel_rider_id,
+      rider: r.rider_name,
+      status: r.status,
+      reason: r.reason,
+      createdAt: r.first_seen_at,
+      updatedAt: r.updated_at,
+    }));
     return {
       pending,
       provisionalRiders,
@@ -836,8 +873,8 @@ export function createWeeklyPaymentService({
   }
 
   // Admin chooses the registered rider for one pending row. The choice is recorded, then the pending rows are imported.
-  function mapPending(id, riderId, actor = "") {
-    const row = db
+  async function mapPending(id, riderId, actor = "") {
+    const row = await db
       .prepare("SELECT * FROM weekly_payment_pending WHERE id = ?")
       .get(Number(id));
     if (!row || row.status !== "PENDING")
@@ -845,7 +882,8 @@ export function createWeeklyPaymentService({
         404,
         "This pending record was not found or has already been imported.",
       );
-    const reg = liveRegistrations().find(
+    const regs = await liveRegistrations();
+    const reg = regs.find(
       (g) => normalizeRiderKey(g.rider_id) === normalizeRiderKey(riderId),
     );
     if (!reg)
@@ -854,7 +892,8 @@ export function createWeeklyPaymentService({
         "Choose a rider that is in Rider Registration and has APPROVED status. Pending applications cannot receive payment records.",
       );
     // One mapping resolves every weekly row for this same Excel rider, not just the selected week.
-    const rows = pendingRows().filter(
+    const allPend = await pendingRows();
+    const rows = allPend.filter(
       (p) =>
         normalizeRiderName(p.rider_name) ===
           normalizeRiderName(row.rider_name) &&
@@ -866,27 +905,31 @@ export function createWeeklyPaymentService({
       normalizeRiderName(row.rider_name) +
       "|" +
       normalizeRiderKey(row.excel_rider_id);
-    db.prepare(
-      `INSERT INTO weekly_payment_rider_mappings(mapping_key,excel_rider_id,excel_rider_name,registered_rider_id,created_at,updated_at)
-      VALUES(?,?,?,?,?,?) ON CONFLICT(mapping_key) DO UPDATE SET registered_rider_id=excluded.registered_rider_id,updated_at=excluded.updated_at`,
-    ).run(
-      mappingKey,
-      row.excel_rider_id,
-      row.rider_name,
-      reg.rider_id,
-      stamp,
-      stamp,
-    );
-    db.prepare(
-      "UPDATE weekly_payment_pending SET mapped_rider_id = ?, updated_at = ? WHERE id = ?",
-    ).run(reg.rider_id, stamp, row.id);
-    audit(actor, "weekly_payment_pending_mapped", {
+    await db
+      .prepare(
+        `INSERT INTO weekly_payment_rider_mappings(mapping_key,excel_rider_id,excel_rider_name,registered_rider_id,created_at,updated_at)
+         VALUES(?,?,?,?,?,?) ON CONFLICT(mapping_key) DO UPDATE SET registered_rider_id=excluded.registered_rider_id,updated_at=excluded.updated_at`,
+      )
+      .run(
+        mappingKey,
+        row.excel_rider_id,
+        row.rider_name,
+        reg.rider_id,
+        stamp,
+        stamp,
+      );
+    await db
+      .prepare(
+        "UPDATE weekly_payment_pending SET mapped_rider_id = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(reg.rider_id, stamp, row.id);
+    await audit(actor, "weekly_payment_pending_mapped", {
       pendingId: row.id,
       rider: row.rider_name,
       riderId: reg.rider_id,
       weeklyRows: rows.length,
     });
-    const result = applyRecords([], {
+    const result = await applyRecords([], {
       fileName: row.file_name || "Pending mapping",
       fileHash: "",
       actor,
@@ -946,33 +989,32 @@ export function createWeeklyPaymentService({
     sheet: r.sheet,
     rowNumber: r.row_number,
     importedAt: r.updated_at,
-    importId: r.import_id,
     paymentStatus: PAYMENT_STATUSES.includes(r.payment_status)
       ? r.payment_status
       : "PENDING",
   });
 
   // q matches the rider name, the Rider ID or the week (as written in the sheet, or as 2026-10-26).
-  function list({ q = "" } = {}) {
+  async function list({ q = "" } = {}) {
     const term = clean(q).toLowerCase();
     let rows;
     if (term) {
       const like = "%" + likeEscape(term) + "%";
-      rows = db
+      rows = await db
         .prepare(
           `SELECT * FROM weekly_payments WHERE lower(rider_name) LIKE ? ESCAPE '\\' OR lower(rider_id) LIKE ? ESCAPE '\\'
-        OR lower(week_label) LIKE ? ESCAPE '\\' OR week_start LIKE ? ESCAPE '\\' OR week_end LIKE ? ESCAPE '\\'
-        ORDER BY (week_start = '') ASC, week_start ASC, sheet COLLATE NOCASE ASC, COALESCE(row_number, 0) ASC, id ASC LIMIT 50000`,
+           OR lower(week_label) LIKE ? ESCAPE '\\' OR week_start LIKE ? ESCAPE '\\' OR week_end LIKE ? ESCAPE '\\'
+           ORDER BY (week_start = '') ASC, week_start ASC, LOWER(sheet) ASC, COALESCE(row_number, 0) ASC, id ASC LIMIT 50000`,
         )
         .all(like, like, like, like, like);
     } else {
-      rows = db
+      rows = await db
         .prepare(
-          "SELECT * FROM weekly_payments ORDER BY (week_start = '') ASC, week_start ASC, sheet COLLATE NOCASE ASC, COALESCE(row_number, 0) ASC, id ASC LIMIT 50000",
+          "SELECT * FROM weekly_payments ORDER BY (week_start = '') ASC, week_start ASC, LOWER(sheet) ASC, COALESCE(row_number, 0) ASC, id ASC LIMIT 50000",
         )
         .all();
     }
-    const last = db
+    const last = await db
       .prepare(
         "SELECT * FROM weekly_payment_imports ORDER BY imported_at DESC LIMIT 1",
       )
@@ -997,7 +1039,7 @@ export function createWeeklyPaymentService({
 
   // Admin sets the payment status of one saved rider-week. Only payment_status changes: amounts, Rider ID, week and
   // the import history are left exactly as saved, and no row is deleted.
-  function setPaymentStatus(id, status, actor = "") {
+  async function setPaymentStatus(id, status, actor = "") {
     const next = String(status ?? "")
       .trim()
       .toUpperCase();
@@ -1006,7 +1048,7 @@ export function createWeeklyPaymentService({
         400,
         "Choose Pending, Processing, Paid or Failed.",
       );
-    const row = db
+    const row = await db
       .prepare(
         "SELECT id, rider_name, rider_id, week_label, payment_status FROM weekly_payments WHERE id = ?",
       )
@@ -1026,10 +1068,10 @@ export function createWeeklyPaymentService({
         previousStatus: previous,
         changed: false,
       };
-    db.prepare(
-      "UPDATE weekly_payments SET payment_status = ? WHERE id = ?",
-    ).run(next, row.id);
-    audit(actor, "weekly_payment_status_changed", {
+    await db
+      .prepare("UPDATE weekly_payments SET payment_status = ? WHERE id = ?")
+      .run(next, row.id);
+    await audit(actor, "weekly_payment_status_changed", {
       id: row.id,
       rider: row.rider_name,
       riderId: row.rider_id,
@@ -1046,10 +1088,10 @@ export function createWeeklyPaymentService({
   }
 
   // Run after an Admin approves a rider: pending Excel rows with that Rider ID are imported now, not at the next upload.
-  function recheckPending(actor = "") {
-    if (!pendingRows().length)
+  async function recheckPending(actor = "") {
+    if (!(await pendingRows()).length)
       return { pendingVerified: 0, inserted: 0, updated: 0 };
-    const result = applyRecords([], {
+    const result = await applyRecords([], {
       fileName: "Re-check after rider approval",
       fileHash: "",
       actor,
@@ -1075,13 +1117,13 @@ export function createWeeklyPaymentService({
 // The rows one franchise may see: weekly records whose Rider ID is an APPROVED Franchise registration owned by this
 // account. Matching uses the Rider ID only; the displayed name is the registered name. Provisional (unverified) rows
 // are never included. Enforced here on the server, not in the browser.
-export function listForFranchise(db, accountId) {
+export async function listForFranchise(db, accountId) {
   if (!accountId) return [];
   return db
     .prepare(
       `SELECT wp.rider_id AS riderId,rr.rider_name AS riderName,
       wp.week_label AS week,wp.week_key AS weekKey,wp.week_start AS weekStart,wp.week_end AS weekEnd,
-      CASE WHEN wp.week_start<>'' AND wp.week_end<>'' AND julianday(wp.week_end)-julianday(wp.week_start)>=8 THEN '15-day' ELSE 'weekly' END AS cycle,
+      CASE WHEN wp.week_start ~ '^\\d{4}-\\d{2}-\\d{2}$' AND wp.week_end ~ '^\\d{4}-\\d{2}-\\d{2}$' AND (wp.week_end::date - wp.week_start::date) >= 8 THEN '15-day' ELSE 'weekly' END AS cycle,
       wp.days AS days,wp.total_orders AS totalOrders,wp.lm AS lm,wp.primary_orders AS primaryOrders,
       wp.club AS club,wp.sdd AS sdd,wp.lm_amount AS lmAmount,wp.prime_amount AS primeAmount,
       wp.club_amount AS clubAmount,wp.sdd_amount AS sddAmount,COALESCE(wp.amount,0) AS amount
@@ -1089,7 +1131,7 @@ export function listForFranchise(db, accountId) {
     JOIN rider_registrations rr ON lower(trim(rr.rider_id))=lower(trim(wp.rider_id))
     WHERE rr.owner_account_id=? AND rr.registration_source='Franchise' AND rr.application_status='APPROVED'
       AND wp.rider_id<>'' AND wp.rider_key NOT LIKE 'provisional:%'
-    ORDER BY wp.week_start DESC,wp.week_end DESC,wp.sheet COLLATE NOCASE,COALESCE(wp.row_number,0),rr.rider_name COLLATE NOCASE
+    ORDER BY wp.week_start DESC,wp.week_end DESC,LOWER(wp.sheet),COALESCE(wp.row_number,0),LOWER(rr.rider_name)
     LIMIT 50000`,
     )
     .all(accountId);
@@ -1098,13 +1140,13 @@ export function listForFranchise(db, accountId) {
 // The rows one vendor may see: weekly records whose Rider ID is an APPROVED rider that this vendor registered
 // (registration_source = Vendor and owner_account_id = this vendor's account). Matching uses the Rider ID only.
 // Pending, rejected, provisional and other vendors' riders are never included.
-export function listForVendor(db, accountId) {
+export async function listForVendor(db, accountId) {
   if (!accountId) return [];
   return db
     .prepare(
       `SELECT wp.rider_id AS riderId,rr.rider_name AS riderName,
       wp.week_label AS week,wp.week_key AS weekKey,wp.week_start AS weekStart,wp.week_end AS weekEnd,
-      CASE WHEN wp.week_start<>'' AND wp.week_end<>'' AND julianday(wp.week_end)-julianday(wp.week_start)>=8 THEN '15-day' ELSE 'weekly' END AS cycle,
+      CASE WHEN wp.week_start ~ '^\\d{4}-\\d{2}-\\d{2}$' AND wp.week_end ~ '^\\d{4}-\\d{2}-\\d{2}$' AND (wp.week_end::date - wp.week_start::date) >= 8 THEN '15-day' ELSE 'weekly' END AS cycle,
       wp.days AS days,wp.total_orders AS totalOrders,wp.lm AS lm,wp.primary_orders AS primaryOrders,
       wp.club AS club,wp.sdd AS sdd,wp.lm_amount AS lmAmount,wp.prime_amount AS primeAmount,
       wp.club_amount AS clubAmount,wp.sdd_amount AS sddAmount,COALESCE(wp.amount,0) AS amount
@@ -1112,7 +1154,7 @@ export function listForVendor(db, accountId) {
     JOIN rider_registrations rr ON lower(trim(rr.rider_id))=lower(trim(wp.rider_id))
     WHERE rr.owner_account_id=? AND rr.registration_source='Vendor' AND rr.application_status='APPROVED'
       AND wp.rider_id<>'' AND wp.rider_key NOT LIKE 'provisional:%'
-    ORDER BY wp.week_start DESC,wp.week_end DESC,wp.sheet COLLATE NOCASE,COALESCE(wp.row_number,0),rr.rider_name COLLATE NOCASE
+    ORDER BY wp.week_start DESC,wp.week_end DESC,LOWER(wp.sheet),COALESCE(wp.row_number,0),LOWER(rr.rider_name)
     LIMIT 50000`,
     )
     .all(accountId);
@@ -1121,7 +1163,7 @@ export function listForVendor(db, accountId) {
 // The partners whose riders received rows in one import (or Admin mapping / re-check): one entry per vendor or
 // franchise account, with the number of rows and riders. Same visibility rules as listForVendor / listForFranchise:
 // only APPROVED registrations owned by an active account of the matching role, never provisional rows.
-export function partnerGroupsForImport(db, importId) {
+export async function partnerGroupsForImport(db, importId) {
   if (!importId) return [];
   return db
     .prepare(
@@ -1136,7 +1178,7 @@ export function partnerGroupsForImport(db, importId) {
       WHERE wp.import_id=? AND wp.rider_id<>'' AND wp.rider_key NOT LIKE 'provisional:%'
         AND rr.application_status='APPROVED' AND rr.registration_source IN ('Vendor','Franchise')
         AND a.role=lower(rr.registration_source) AND a.status='active'
-      GROUP BY a.id
+      GROUP BY a.id, a.role
       ORDER BY a.id`,
     )
     .all(importId);
