@@ -1,6 +1,6 @@
 // Hub Management: the hub master list (Admin Portal only).
 //
-// Hubs live in the `hubs` table of the same SQLite database as the rest of the backend. hub-routes.js exposes
+// Hubs live in the `hubs` table of the PostgreSQL database. hub-routes.js exposes
 // these rules over HTTP; this file holds the rules themselves so they can be tested without the web framework.
 //
 // Duplicate rule: a hub is identified by its Hub Name (letter case and extra spaces are ignored). The database
@@ -114,7 +114,7 @@ const clean = (v) =>
 const pad2 = (n) => String(n).padStart(2, "0");
 export const nameKey = (v) => clean(v).toLowerCase();
 const isUniqueViolation = (err) =>
-  /UNIQUE constraint failed/.test(String(err?.message || ""));
+  err?.code === "23505" || /UNIQUE constraint failed|duplicate key/i.test(String(err?.message || ""));
 function parseJson(text, fallback) {
   try {
     const v = JSON.parse(text);
@@ -345,13 +345,13 @@ function mergeUnique(stored, incoming, keyOf) {
 }
 
 // ---------- storage ----------
-export function createHubService({
+export async function createHubService({
   db,
   audit = () => {},
   now = () => new Date().toISOString(),
   seedRows = [],
 }) {
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS hubs(
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -381,12 +381,20 @@ export function createHubService({
     );
     CREATE TABLE IF NOT EXISTS hub_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
+
   // Hubs created from an approved Franchise / Vendor location keep that location's ID here.
   // The unique index means one location can never create two hubs. Hubs added by hand keep this empty (NULL).
-  const hubColumns = db.prepare("PRAGMA table_info(hubs)").all().map((c) => c.name);
+  const columnRows = await db
+    .prepare(
+      `SELECT column_name AS name
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'hubs'`,
+    )
+    .all();
+  const hubColumns = columnRows.map((c) => c.name);
   if (!hubColumns.includes("source_location_id"))
-    db.exec("ALTER TABLE hubs ADD COLUMN source_location_id TEXT");
-  db.exec(
+    await db.exec("ALTER TABLE hubs ADD COLUMN source_location_id TEXT");
+  await db.exec(
     "CREATE UNIQUE INDEX IF NOT EXISTS hubs_source_location ON hubs(source_location_id)",
   );
 
@@ -425,11 +433,12 @@ export function createHubService({
   });
 
   // Hub ids look like XH-001, XH-002 ... Counting continues from the highest id already in use.
-  function idAllocator() {
+  async function idAllocator(executor = db) {
     let max = 0;
-    for (const r of db
+    const rows = await executor
       .prepare("SELECT id FROM hubs WHERE id LIKE 'XH-%'")
-      .all()) {
+      .all();
+    for (const r of rows) {
       const n = Number(String(r.id).slice(3));
       if (Number.isInteger(n) && n > max) max = n;
     }
@@ -463,17 +472,18 @@ export function createHubService({
     return COLS.map((c) => byColumn[c]);
   }
 
-  function list() {
-    return selectAll.all().map(toApi);
+  async function list() {
+    const rows = await selectAll.all();
+    return rows.map(toApi);
   }
 
-  function get(id) {
-    const row = selectById.get(String(id));
+  async function get(id) {
+    const row = await selectById.get(String(id));
     return row ? toApi(row) : null;
   }
 
-  function requireRow(id) {
-    const row = selectById.get(String(id));
+  async function requireRow(id) {
+    const row = await selectById.get(String(id));
     if (!row)
       throw new HubError(
         404,
@@ -482,22 +492,23 @@ export function createHubService({
     return row;
   }
 
-  function create(input, actor = "") {
+  async function create(input, actor = "") {
     const { values, errors } = normalizeHubInput(input, { mode: "form" });
     if (errors.length)
       throw new HubError(400, errors[0].message, errors[0].field, errors);
     const key = nameKey(values.name);
-    if (selectByKey.get(key)) {
+    if (await selectByKey.get(key)) {
       throw new HubError(
         409,
         "A hub with this Hub Name already exists. Use Edit on that hub instead of adding it again.",
         "name",
       );
     }
-    const id = idAllocator()();
+    const allocateId = await idAllocator();
+    const id = allocateId();
     const stamp = now();
     try {
-      insertStmt.run(
+      await insertStmt.run(
         ...rowFor(values, {
           id,
           nameKey: key,
@@ -515,13 +526,13 @@ export function createHubService({
         );
       throw err;
     }
-    audit(actor, "hub_created", { id, name: values.name });
+    await audit(actor, "hub_created", { id, name: values.name });
     return get(id);
   }
 
   // Changes only the fields that were sent and that actually differ from what is saved.
-  function update(id, input, actor = "") {
-    const current = requireRow(id);
+  async function update(id, input, actor = "") {
+    const current = await requireRow(id);
     if (!input || typeof input !== "object")
       throw new HubError(400, "Nothing to save.");
     const { values, errors } = normalizeHubInput(input, {
@@ -545,7 +556,7 @@ export function createHubService({
     }
     if ("name" in changes) {
       const key = nameKey(changes.name);
-      const other = selectByKey.get(key);
+      const other = await selectByKey.get(key);
       if (other && other.id !== current.id) {
         throw new HubError(
           409,
@@ -559,7 +570,7 @@ export function createHubService({
     sets.push("updated_at=?", "updated_by=?");
     args.push(now(), actor);
     try {
-      db.prepare(`UPDATE hubs SET ${sets.join(",")} WHERE id=?`).run(
+      await db.prepare(`UPDATE hubs SET ${sets.join(",")} WHERE id=?`).run(
         ...args,
         current.id,
       );
@@ -572,25 +583,25 @@ export function createHubService({
         );
       throw err;
     }
-    audit(actor, "hub_updated", { id: current.id, changed });
-    return { hub: get(current.id), changed };
+    await audit(actor, "hub_updated", { id: current.id, changed });
+    return { hub: await get(current.id), changed };
   }
 
-  function remove(id, actor = "") {
-    const current = requireRow(id);
+  async function remove(id, actor = "") {
+    const current = await requireRow(id);
     if (current.source_location_id)
       throw new HubError(
         409,
         "This hub came from an approved Franchise / Vendor location. Delete the location in Submitted Locations instead, which sets this hub to Inactive. Its details are kept.",
       );
-    db.prepare("DELETE FROM hubs WHERE id=?").run(current.id);
-    audit(actor, "hub_deleted", { id: current.id, name: current.name });
+    await db.prepare("DELETE FROM hubs WHERE id=?").run(current.id);
+    await audit(actor, "hub_deleted", { id: current.id, name: current.name });
     return { ok: true };
   }
 
   // Hub down notes (shown under Hub Down Notes on the Hub Management page).
-  function addNote(id, input = {}, actor = "") {
-    const current = requireRow(id);
+  async function addNote(id, input = {}, actor = "") {
+    const current = await requireRow(id);
     const text = clean(input.text).slice(0, 500);
     if (!text) throw new HubError(400, "Enter the hub down note.", "text");
     const vacancies =
@@ -607,16 +618,18 @@ export function createHubService({
     const notes = parseJson(current.notes, []);
     const stamp = now();
     notes.push({ id: crypto.randomUUID(), text, vacancies, date: stamp });
-    db.prepare(
-      "UPDATE hubs SET notes=?, updated_at=?, updated_by=? WHERE id=?",
-    ).run(JSON.stringify(notes), stamp, actor, current.id);
-    audit(actor, "hub_note_added", { id: current.id, vacancies });
-    return { hub: get(current.id) };
+    await db
+      .prepare(
+        "UPDATE hubs SET notes=?, updated_at=?, updated_by=? WHERE id=?",
+      )
+      .run(JSON.stringify(notes), stamp, actor, current.id);
+    await audit(actor, "hub_note_added", { id: current.id, vacancies });
+    return { hub: await get(current.id) };
   }
 
   // Imports Excel / CSV rows (or records restored from older browser data).
   // Returns a report. dryRun: true only previews; nothing is written.
-  function importRows(
+  async function importRows(
     rows,
     { source = "excel", dryRun = true, actor = "", fileName = "" } = {},
   ) {
@@ -629,13 +642,9 @@ export function createHubService({
       );
     }
     const mode = source === "browser" ? "lenient" : "excel";
-    const existing = new Map(
-      db
-        .prepare("SELECT * FROM hubs")
-        .all()
-        .map((r) => [r.name_key, r]),
-    );
-    const allocateId = idAllocator();
+    const allHubs = await db.prepare("SELECT * FROM hubs").all();
+    const existing = new Map(allHubs.map((r) => [r.name_key, r]));
+    const allocateId = await idAllocator();
     const seenInFile = new Map();
     const stamp = now();
     const report = {
@@ -741,11 +750,11 @@ export function createHubService({
     });
 
     if (!dryRun && plan.length) {
-      db.exec("BEGIN");
-      try {
+      await db.transaction(async (tx) => {
+        const txInsertStmt = tx.prepare(insertSql);
         for (const item of plan) {
           if (item.kind === "insert") {
-            insertStmt.run(
+            await txInsertStmt.run(
               ...rowFor(item.values, {
                 id: item.id,
                 nameKey: item.key,
@@ -773,17 +782,13 @@ export function createHubService({
             }
             sets.push("updated_at=?", "updated_by=?");
             args.push(stamp, actor, item.id);
-            db.prepare(`UPDATE hubs SET ${sets.join(",")} WHERE id=?`).run(
-              ...args,
-            );
+            await tx
+              .prepare(`UPDATE hubs SET ${sets.join(",")} WHERE id=?`)
+              .run(...args);
           }
         }
-        db.exec("COMMIT");
-      } catch (err) {
-        db.exec("ROLLBACK");
-        throw err;
-      }
-      audit(actor, "hub_import", {
+      })();
+      await audit(actor, "hub_import", {
         fileName: report.fileName,
         source,
         total: report.total,
@@ -840,8 +845,8 @@ export function createHubService({
     `INSERT INTO hubs(${[...COLS, "source_location_id"].join(",")}) VALUES(${[...COLS, "source_location_id"].map(() => "?").join(",")})`,
   );
 
-  function findBySourceLocation(locationId) {
-    const row = selectBySource.get(String(locationId || ""));
+  async function findBySourceLocation(locationId) {
+    const row = await selectBySource.get(String(locationId || ""));
     return row ? toApi(row) : null;
   }
 
@@ -875,8 +880,14 @@ export function createHubService({
   }
 
   // Creates the hub for an approved location, once. A location that already has its hub gets that hub back.
-  function createFromLocation(loc, contact = {}, actor = "") {
-    const existing = selectBySource.get(loc.id);
+  async function createFromLocation(loc, contact = {}, actor = "", tx = db) {
+    const txSelectBySource = tx.prepare("SELECT * FROM hubs WHERE source_location_id=?");
+    const txSelectByKey = tx.prepare("SELECT * FROM hubs WHERE name_key=?");
+    const txInsertFromLocationStmt = tx.prepare(
+      `INSERT INTO hubs(${[...COLS, "source_location_id"].join(",")}) VALUES(${[...COLS, "source_location_id"].map(() => "?").join(",")})`,
+    );
+
+    const existing = await txSelectBySource.get(loc.id);
     if (existing) return { hub: toApi(existing), created: false };
     const values = fieldsFromLocation(loc, contact);
     const key = nameKey(values.name);
@@ -886,11 +897,12 @@ export function createHubService({
         `A hub named "${values.name}" is already in Hub List, so this location cannot be added automatically. Change the Location Name, or the existing hub, and approve again.`,
         "name",
       );
-    if (selectByKey.get(key)) throw nameTaken();
-    const id = idAllocator()();
+    if (await txSelectByKey.get(key)) throw nameTaken();
+    const allocateId = await idAllocator(tx);
+    const id = allocateId();
     const stamp = now();
     try {
-      insertFromLocationStmt.run(
+      await txInsertFromLocationStmt.run(
         ...rowFor(values, {
           id,
           nameKey: key,
@@ -903,23 +915,24 @@ export function createHubService({
     } catch (err) {
       if (!isUniqueViolation(err)) throw err;
       // Another request already created this hub for this location: return it instead of adding a second one.
-      const again = selectBySource.get(loc.id);
+      const again = await txSelectBySource.get(loc.id);
       if (again) return { hub: toApi(again), created: false };
       throw nameTaken();
     }
-    audit(actor, "hub_created_from_location", {
+    await audit(actor, "hub_created_from_location", {
       id,
       name: values.name,
       sourceLocationId: loc.id,
     });
-    return { hub: get(id), created: true };
+    const createdRow = await tx.prepare("SELECT * FROM hubs WHERE id=?").get(id);
+    return { hub: createdRow ? toApi(createdRow) : null, created: true };
   }
 
   // An approved location was edited: copy the location fields to its hub. Other hub fields are left as they are.
-  function syncFromLocation(loc, actor = "") {
-    const row = selectBySource.get(loc.id);
+  async function syncFromLocation(loc, actor = "") {
+    const row = await selectBySource.get(loc.id);
     if (!row) return null;
-    return update(
+    const res = await update(
       row.id,
       {
         name: loc.name,
@@ -931,35 +944,39 @@ export function createHubService({
         url: loc.url || "",
       },
       actor,
-    ).hub;
+    );
+    return res.hub;
   }
 
   // An approved location was deleted: its hub is set to Inactive, never deleted.
-  function deactivateFromLocation(loc, actor = "") {
-    const row = selectBySource.get(loc.id);
+  async function deactivateFromLocation(loc, actor = "") {
+    const row = await selectBySource.get(loc.id);
     if (!row) return null;
     if (row.status === "Inactive") return toApi(row);
-    return update(row.id, { status: "Inactive" }, actor).hub;
+    const res = await update(row.id, { status: "Inactive" }, actor);
+    return res.hub;
   }
 
   // The first start loads the hubs from data/hubs-seed.json, once. Later deletions are never undone by a restart.
-  function seedIfNeeded() {
-    if (db.prepare("SELECT value FROM hub_meta WHERE key='seed_v1'").get())
+  async function seedIfNeeded() {
+    if (await db.prepare("SELECT value FROM hub_meta WHERE key='seed_v1'").get())
       return 0;
-    const allocateId = idAllocator();
+    const allocateId = await idAllocator();
     let added = 0;
-    db.exec("BEGIN");
-    try {
+    await db.transaction(async (tx) => {
+      const txSelectByKey = tx.prepare("SELECT * FROM hubs WHERE name_key=?");
+      const txSelectById = tx.prepare("SELECT * FROM hubs WHERE id=?");
+      const txInsertStmt = tx.prepare(insertSql);
       for (const raw of seedRows) {
         const { values } = normalizeHubInput(raw, { mode: "lenient" });
         const key = nameKey(values.name);
-        if (!key || selectByKey.get(key)) continue;
+        if (!key || (await txSelectByKey.get(key))) continue;
         const id =
-          raw.id && !selectById.get(String(raw.id))
+          raw.id && !(await txSelectById.get(String(raw.id)))
             ? String(raw.id)
             : allocateId();
         const stamp = now();
-        insertStmt.run(
+        await txInsertStmt.run(
           ...rowFor(values, {
             id,
             nameKey: key,
@@ -972,18 +989,14 @@ export function createHubService({
         );
         added += 1;
       }
-      db.prepare("INSERT INTO hub_meta(key,value) VALUES('seed_v1',?)").run(
-        String(added),
-      );
-      db.exec("COMMIT");
-    } catch (err) {
-      db.exec("ROLLBACK");
-      throw err;
-    }
+      await tx
+        .prepare("INSERT INTO hub_meta(key,value) VALUES('seed_v1',?)")
+        .run(String(added));
+    })();
     return added;
   }
 
-  seedIfNeeded();
+  await seedIfNeeded();
 
   return {
     list,
