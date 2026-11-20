@@ -69,7 +69,7 @@ export function createPaymentImportService({
     );
     CREATE INDEX IF NOT EXISTS payment_import_versions_hash ON payment_import_versions(file_hash);
     CREATE TABLE IF NOT EXISTS payment_import_rows(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id BIGSERIAL PRIMARY KEY,
       version_id TEXT NOT NULL,
       row_no INTEGER NOT NULL,
       rider_id TEXT NOT NULL DEFAULT '',
