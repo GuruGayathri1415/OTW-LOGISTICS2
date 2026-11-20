@@ -675,7 +675,7 @@ async function mailStatus({ fresh = false } = {}) {
   return mailCheck;
 }
 
-const passwordHelp = createPasswordHelpService({ db, auth, audit });
+const passwordHelp = await createPasswordHelpService({ db, auth, audit });
 app.get("/api/auth/forgot-password/options", async (req, res) => {
   res.set("Cache-Control", "no-store");
   const mail = await mailStatus();
