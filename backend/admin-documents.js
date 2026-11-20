@@ -7,7 +7,7 @@
 // Files are checked by their content (not by the browser's claim or the file name). The same document cannot be
 // uploaded twice for one rider, and a repeated submission with the same submissionId returns the first record.
 //
-// createAdminDocumentService has no web-framework dependency, so its rules can be tested directly against SQLite.
+// createAdminDocumentService has no web-framework dependency.
 // The HTTP routes are in admin-document-routes.js.
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -85,8 +85,8 @@ const checkDocument = (file) => checkFile(file, { label: "document", pdfAllowed:
 const checkSelfie = (file) =>
   checkFile(file, { label: "Rider Selfie / Screenshot", pdfAllowed: false, extensions: SELFIE_EXTENSIONS });
 
-export function createAdminDocumentService({ db, uploadDir, audit = () => {} }) {
-  db.exec(`CREATE TABLE IF NOT EXISTS admin_rider_documents(
+export async function createAdminDocumentService({ db, uploadDir, audit = async () => {} }) {
+  await db.exec(`CREATE TABLE IF NOT EXISTS admin_rider_documents(
     id TEXT PRIMARY KEY,
     rider_id TEXT NOT NULL,
     rider_name TEXT NOT NULL DEFAULT '',
@@ -99,8 +99,16 @@ export function createAdminDocumentService({ db, uploadDir, audit = () => {} }) 
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS admin_rider_documents_rider ON admin_rider_documents(rider_id);`);
+
   // Columns added by this version. Existing records get NULL here and keep working unchanged.
-  const have = new Set(db.prepare("PRAGMA table_info(admin_rider_documents)").all().map((c) => c.name));
+  const colRows = await db
+    .prepare(
+      `SELECT column_name AS name
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'admin_rider_documents'`,
+    )
+    .all();
+  const have = new Set(colRows.map((c) => c.name));
   const added = {
     selfie_stored: "TEXT",
     selfie_name: "TEXT",
@@ -111,9 +119,9 @@ export function createAdminDocumentService({ db, uploadDir, audit = () => {} }) 
     updated_at: "TEXT",
   };
   for (const [col, type] of Object.entries(added))
-    if (!have.has(col)) db.exec(`ALTER TABLE admin_rider_documents ADD COLUMN ${col} ${type}`);
-  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS admin_rider_documents_client_key ON admin_rider_documents(client_key)");
-  db.exec("CREATE INDEX IF NOT EXISTS admin_rider_documents_hash ON admin_rider_documents(rider_id, doc_type, file_sha256)");
+    if (!have.has(col)) await db.exec(`ALTER TABLE admin_rider_documents ADD COLUMN ${col} ${type}`);
+  await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS admin_rider_documents_client_key ON admin_rider_documents(client_key)");
+  await db.exec("CREATE INDEX IF NOT EXISTS admin_rider_documents_hash ON admin_rider_documents(rider_id, doc_type, file_sha256)");
 
   const dir = path.join(uploadDir, "admin-documents");
   const fullPath = (stored) => path.join(dir, stored);
@@ -133,8 +141,11 @@ export function createAdminDocumentService({ db, uploadDir, audit = () => {} }) 
   });
   const rowOf = (id) => db.prepare("SELECT * FROM admin_rider_documents WHERE id=?").get(String(id));
 
-  function list() {
-    return db.prepare("SELECT * FROM admin_rider_documents ORDER BY created_at DESC LIMIT 20000").all().map(toPublic);
+  async function list() {
+    const rows = await db
+      .prepare("SELECT * FROM admin_rider_documents ORDER BY created_at DESC LIMIT 20000")
+      .all();
+    return rows.map(toPublic);
   }
 
   function writeFile(stored, buffer) {
@@ -149,21 +160,21 @@ export function createAdminDocumentService({ db, uploadDir, audit = () => {} }) 
     } catch {}
   };
 
-  function add(actor, { riderId, riderName, type, submissionId }, files = {}) {
+  async function add(actor, { riderId, riderName, type, submissionId }, files = {}) {
     const rid = normalizeRiderId(riderId);
     if (!rid) throw new AdminDocumentError(400, "Choose the rider first.");
     const docType = DOC_TYPES.includes(String(type)) ? String(type) : "";
     if (!docType) throw new AdminDocumentError(400, "Choose a document type.");
     const key = SUBMISSION_ID.test(String(submissionId || "")) ? String(submissionId) : null;
     if (key) {
-      const again = db.prepare("SELECT * FROM admin_rider_documents WHERE client_key=?").get(key);
+      const again = await db.prepare("SELECT * FROM admin_rider_documents WHERE client_key=?").get(key);
       if (again) return { item: toPublic(again), duplicate: true };
     }
     const doc = checkDocument(files.document);
     if (!doc) throw new AdminDocumentError(400, "Choose a document file to upload.");
     const selfie = checkSelfie(files.selfie);
     const hash = sha256(doc.buffer);
-    const same = db
+    const same = await db
       .prepare("SELECT id FROM admin_rider_documents WHERE rider_id=? AND doc_type=? AND file_sha256=?")
       .get(rid, docType, hash);
     if (same) throw new AdminDocumentError(409, "This document is already uploaded for this rider.");
@@ -173,46 +184,49 @@ export function createAdminDocumentService({ db, uploadDir, audit = () => {} }) 
     const stored = writeFile(id + DOC_EXT[doc.mime], doc.buffer);
     const selfieStored = selfie ? writeFile(`${id}-selfie-${randomTag()}${DOC_EXT[selfie.mime]}`, selfie.buffer) : null;
     try {
-      db.prepare(
-        `INSERT INTO admin_rider_documents(id,rider_id,rider_name,doc_type,original_name,mime,size,stored_name,uploaded_by,created_at,
-           selfie_stored,selfie_name,selfie_mime,selfie_size,file_sha256,client_key,updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      ).run(
-        id,
-        rid,
-        clean(riderName, 120),
-        docType,
-        doc.name,
-        doc.mime,
-        doc.buffer.length,
-        stored,
-        clean(actor, 254),
-        now,
-        selfieStored,
-        selfie ? selfie.name : null,
-        selfie ? selfie.mime : null,
-        selfie ? selfie.buffer.length : null,
-        hash,
-        key,
-        now,
-      );
+      await db
+        .prepare(
+          `INSERT INTO admin_rider_documents(id,rider_id,rider_name,doc_type,original_name,mime,size,stored_name,uploaded_by,created_at,
+             selfie_stored,selfie_name,selfie_mime,selfie_size,file_sha256,client_key,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          id,
+          rid,
+          clean(riderName, 120),
+          docType,
+          doc.name,
+          doc.mime,
+          doc.buffer.length,
+          stored,
+          clean(actor, 254),
+          now,
+          selfieStored,
+          selfie ? selfie.name : null,
+          selfie ? selfie.mime : null,
+          selfie ? selfie.buffer.length : null,
+          hash,
+          key,
+          now,
+        );
     } catch (err) {
       unlinkQuietly(stored);
       unlinkQuietly(selfieStored);
       // A double submit that raced past the check above still gets the record that was saved first.
-      if (key && /UNIQUE/i.test(String(err.message))) {
-        const again = db.prepare("SELECT * FROM admin_rider_documents WHERE client_key=?").get(key);
+      if (key && /UNIQUE|duplicate key/i.test(String(err.message))) {
+        const again = await db.prepare("SELECT * FROM admin_rider_documents WHERE client_key=?").get(key);
         if (again) return { item: toPublic(again), duplicate: true };
       }
       throw err;
     }
-    audit(actor, "rider_document_uploaded", { id, riderId: rid, type: docType, selfie: !!selfie });
-    return { item: toPublic(rowOf(id)), duplicate: false };
+    await audit(actor, "rider_document_uploaded", { id, riderId: rid, type: docType, selfie: !!selfie });
+    const created = await rowOf(id);
+    return { item: toPublic(created), duplicate: false };
   }
 
   // Replaces the document file, the selfie, or the document type of an existing record. Anything not sent is kept.
-  function replace(actor, id, { type }, files = {}) {
-    const row = rowOf(id);
+  async function replace(actor, id, { type }, files = {}) {
+    const row = await rowOf(id);
     if (!row) throw new AdminDocumentError(404, "Document not found.");
     let docType = row.doc_type;
     if (type !== undefined && type !== null && String(type) !== "") {
@@ -225,7 +239,7 @@ export function createAdminDocumentService({ db, uploadDir, audit = () => {} }) 
       throw new AdminDocumentError(400, "Choose a new file, a new selfie or a new document type to save.");
     const hash = doc ? sha256(doc.buffer) : row.file_sha256;
     if (doc || docType !== row.doc_type) {
-      const same = db
+      const same = await db
         .prepare("SELECT id FROM admin_rider_documents WHERE rider_id=? AND doc_type=? AND file_sha256=? AND id<>?")
         .get(row.rider_id, docType, hash, row.id);
       if (same) throw new AdminDocumentError(409, "This document is already uploaded for this rider.");
@@ -234,25 +248,27 @@ export function createAdminDocumentService({ db, uploadDir, audit = () => {} }) 
     const newDoc = doc ? writeFile(`${row.id}-${randomTag()}${DOC_EXT[doc.mime]}`, doc.buffer) : null;
     const newSelfie = selfie ? writeFile(`${row.id}-selfie-${randomTag()}${DOC_EXT[selfie.mime]}`, selfie.buffer) : null;
     try {
-      db.prepare(
-        `UPDATE admin_rider_documents SET doc_type=?,
-           original_name=?, mime=?, size=?, stored_name=?, file_sha256=?,
-           selfie_stored=?, selfie_name=?, selfie_mime=?, selfie_size=?, updated_at=?
-         WHERE id=?`,
-      ).run(
-        docType,
-        doc ? doc.name : row.original_name,
-        doc ? doc.mime : row.mime,
-        doc ? doc.buffer.length : row.size,
-        newDoc || row.stored_name,
-        hash,
-        newSelfie || row.selfie_stored,
-        selfie ? selfie.name : row.selfie_name,
-        selfie ? selfie.mime : row.selfie_mime,
-        selfie ? selfie.buffer.length : row.selfie_size,
-        now,
-        row.id,
-      );
+      await db
+        .prepare(
+          `UPDATE admin_rider_documents SET doc_type=?,
+             original_name=?, mime=?, size=?, stored_name=?, file_sha256=?,
+             selfie_stored=?, selfie_name=?, selfie_mime=?, selfie_size=?, updated_at=?
+           WHERE id=?`,
+        )
+        .run(
+          docType,
+          doc ? doc.name : row.original_name,
+          doc ? doc.mime : row.mime,
+          doc ? doc.buffer.length : row.size,
+          newDoc || row.stored_name,
+          hash,
+          newSelfie || row.selfie_stored,
+          selfie ? selfie.name : row.selfie_name,
+          selfie ? selfie.mime : row.selfie_mime,
+          selfie ? selfie.buffer.length : row.selfie_size,
+          now,
+          row.id,
+        );
     } catch (err) {
       unlinkQuietly(newDoc);
       unlinkQuietly(newSelfie);
@@ -261,19 +277,20 @@ export function createAdminDocumentService({ db, uploadDir, audit = () => {} }) 
     // The old files are removed only after the new record is saved.
     if (newDoc) unlinkQuietly(row.stored_name);
     if (newSelfie) unlinkQuietly(row.selfie_stored);
-    audit(actor, "rider_document_replaced", {
+    await audit(actor, "rider_document_replaced", {
       id: row.id,
       riderId: row.rider_id,
       type: docType,
       file: !!newDoc,
       selfie: !!newSelfie,
     });
-    return toPublic(rowOf(row.id));
+    const updated = await rowOf(row.id);
+    return toPublic(updated);
   }
 
   // kind: "document" (default) or "selfie".
-  function fileOf(actor, id, kind = "document") {
-    const row = rowOf(id);
+  async function fileOf(actor, id, kind = "document") {
+    const row = await rowOf(id);
     if (!row) throw new AdminDocumentError(404, "Document not found.");
     const selfie = kind === "selfie";
     const stored = selfie ? row.selfie_stored : row.stored_name;
@@ -281,7 +298,7 @@ export function createAdminDocumentService({ db, uploadDir, audit = () => {} }) 
     const full = fullPath(stored);
     if (!fs.existsSync(full))
       throw new AdminDocumentError(404, "The file of this document is missing on the server.");
-    audit(actor, selfie ? "rider_selfie_viewed" : "rider_document_viewed", {
+    await audit(actor, selfie ? "rider_selfie_viewed" : "rider_document_viewed", {
       id: row.id,
       riderId: row.rider_id,
       type: row.doc_type,
@@ -291,13 +308,13 @@ export function createAdminDocumentService({ db, uploadDir, audit = () => {} }) 
       : { path: full, mime: row.mime, name: row.original_name };
   }
 
-  function remove(actor, id) {
-    const row = rowOf(id);
+  async function remove(actor, id) {
+    const row = await rowOf(id);
     if (!row) throw new AdminDocumentError(404, "Document not found.");
-    db.prepare("DELETE FROM admin_rider_documents WHERE id=?").run(row.id);
+    await db.prepare("DELETE FROM admin_rider_documents WHERE id=?").run(row.id);
     unlinkQuietly(row.stored_name);
     unlinkQuietly(row.selfie_stored);
-    audit(actor, "rider_document_deleted", { id: row.id, riderId: row.rider_id, type: row.doc_type });
+    await audit(actor, "rider_document_deleted", { id: row.id, riderId: row.rider_id, type: row.doc_type });
     return { ok: true };
   }
 
