@@ -1,456 +1,402 @@
-// Helpline / Support tickets: the single store behind the Admin Portal > Support Management page, the
-// Vendor / Franchise portals' Helpline forms, and customer emails that arrive at the support Gmail.
-//
-// - Every request is saved here (support_tickets) with a unique ticket number such as OTW-SUP-20261117-0001,
-//   before any email is sent. A failed email never loses a complaint.
-// - Photos are written to backend/uploads/support/. Only the relative path is stored, so photos survive a restart.
-// - Every message in the conversation is kept in support_ticket_events. Emails we send and receive keep their
-//   Message-ID, so a customer's reply can be matched back to the right ticket.
-// - Ticket status and email delivery status are separate. Email is handled in support-mail.js.
+// Support tickets, events, and attachments backed by the async PostgreSQL adapter (`db-adapter.js`).
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-export const SUPPORT_STATUSES = ["New", "Pending", "In Progress", "Resolved", "Rejected", "Closed"];
-export const SUPPORT_PORTAL_TYPES = ["Vendor", "Franchise", "Email", "Unknown"];
-export const SUPPORT_PHOTO_MAX_BYTES = 8 * 1024 * 1024;
-export const TICKET_NO_PATTERN = /OTW-SUP-\d{8}-\d{4}/;
-const PHOTO_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
-const TEXT_LIMITS = { name: 120, email: 254, phone: 30, description: 3000, reply: 3000, followUp: 2000 };
-const FINISHED = ["Resolved", "Rejected", "Closed"];
+const ALLOWED_STATUSES = new Set([
+  "open",
+  "in_progress",
+  "waiting_on_user",
+  "resolved",
+  "closed",
+]);
 
-export class SupportError extends Error {
-  constructor(status, message, field = "") {
-    super(message);
-    this.status = status;
-    this.field = field;
-  }
-}
+const ALLOWED_PRIORITIES = new Set(["low", "normal", "high", "urgent"]);
 
-// Checks the real file signature, not just the type the browser claims.
-export function detectImageType(buf) {
-  if (!buf || buf.length < 12) return null;
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
-  if (
-    buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
-    buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a
-  )
-    return "image/png";
-  if (buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") return "image/webp";
-  return null;
-}
+export async function createSupportService({ db, uploadDir }) {
+  const supportUploadRoot = path.join(uploadDir, "support-tickets");
+  fs.mkdirSync(supportUploadRoot, { recursive: true, mode: 0o700 });
 
-// Indian date for the ticket number, so a late-night ticket keeps that day's number.
-function istDay(now = new Date()) {
-  return now.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
-}
-const clean = (v, max) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, max);
-export const sameAddress = (a, b) =>
-  String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
-
-// The portal a partner account belongs to. Only vendor and franchise accounts have My Support Requests.
-export function partnerPortalType(role) {
-  return role === "vendor" ? "Vendor" : role === "franchise" ? "Franchise" : null;
-}
-
-export function createSupportService({ db, uploadDir }) {
-  fs.mkdirSync(path.join(uploadDir, "support"), { recursive: true, mode: 0o700 });
-
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS support_tickets(
       id TEXT PRIMARY KEY,
-      ticket_no TEXT NOT NULL UNIQUE,
-      portal_type TEXT NOT NULL,
-      signed_in INTEGER NOT NULL DEFAULT 0,
-      account_id TEXT,
-      account_login TEXT,
-      customer_name TEXT NOT NULL,
-      email TEXT NOT NULL,
-      phone TEXT,
-      description TEXT NOT NULL,
-      photo_path TEXT NOT NULL,
-      photo_mime TEXT NOT NULL,
-      photo_name TEXT,
-      photo_size INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'New',
-      submission_key TEXT UNIQUE,
-      submitted_at TEXT NOT NULL,
+      ticket_code TEXT UNIQUE NOT NULL,
+      subject TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'general',
+      priority TEXT NOT NULL DEFAULT 'normal',
+      status TEXT NOT NULL DEFAULT 'open',
+      requester_role TEXT,
+      requester_id TEXT,
+      requester_name TEXT,
+      requester_email TEXT,
+      assigned_to TEXT,
+      created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      resolved_at TEXT,
-      notify_status TEXT NOT NULL DEFAULT 'pending',
-      notify_error TEXT
+      closed_at TEXT
     );
-    CREATE INDEX IF NOT EXISTS support_tickets_account ON support_tickets(account_id, submitted_at);
-    CREATE INDEX IF NOT EXISTS support_tickets_status ON support_tickets(status, submitted_at);
-    CREATE INDEX IF NOT EXISTS support_tickets_portal ON support_tickets(account_id, portal_type, submitted_at);
+    CREATE INDEX IF NOT EXISTS support_tickets_status ON support_tickets(status, updated_at);
+    CREATE INDEX IF NOT EXISTS support_tickets_requester ON support_tickets(requester_id, created_at);
+
     CREATE TABLE IF NOT EXISTS support_ticket_events(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT PRIMARY KEY,
       ticket_id TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      author_role TEXT NOT NULL,
-      author TEXT NOT NULL,
+      event_type TEXT NOT NULL DEFAULT 'message',
+      actor_role TEXT,
+      actor_id TEXT,
+      actor_name TEXT,
       body TEXT,
-      status TEXT,
+      meta TEXT,
       message_id TEXT,
       created_at TEXT NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS support_events_ticket ON support_ticket_events(ticket_id, id);
-    CREATE INDEX IF NOT EXISTS support_events_message ON support_ticket_events(message_id);
-    CREATE TABLE IF NOT EXISTS support_counter(day TEXT PRIMARY KEY, last INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS support_ticket_events_ticket ON support_ticket_events(ticket_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS support_ticket_attachments(
+      id TEXT PRIMARY KEY,
+      ticket_id TEXT NOT NULL,
+      event_id TEXT,
+      original_name TEXT,
+      mime TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      stored_name TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS support_ticket_attachments_ticket ON support_ticket_attachments(ticket_id);
   `);
-  // Databases made by the previous version have no message_id column. Adding it changes no existing row.
-  if (!db.prepare("PRAGMA table_info(support_ticket_events)").all().some((c) => c.name === "message_id"))
-    db.exec("ALTER TABLE support_ticket_events ADD COLUMN message_id TEXT");
 
-  // Runs fn in one transaction. Works with better-sqlite3 and node:sqlite alike.
-  function tx(fn) {
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      const out = fn();
-      db.exec("COMMIT");
-      return out;
-    } catch (e) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {}
-      throw e;
-    }
+  const cols = await db
+    .prepare(
+      `SELECT column_name AS name
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'support_ticket_events'`,
+    )
+    .all();
+  if (!cols.some((c) => c.name === "message_id")) {
+    await db.exec(
+      "ALTER TABLE support_ticket_events ADD COLUMN message_id TEXT",
+    );
   }
 
-  function nextTicketNo(now) {
-    const day = istDay(now);
-    const row = db.prepare("SELECT last FROM support_counter WHERE day=?").get(day);
-    const last = (row ? row.last : 0) + 1;
-    db.prepare(
-      "INSERT INTO support_counter(day,last) VALUES(?,?) ON CONFLICT(day) DO UPDATE SET last=excluded.last",
-    ).run(day, last);
-    return `OTW-SUP-${day.replace(/-/g, "")}-${String(last).padStart(4, "0")}`;
+  const nowIso = () => new Date().toISOString();
+
+  function cleanText(value, maxLen = 4000) {
+    return String(value ?? "")
+      .trim()
+      .slice(0, maxLen);
   }
 
-  function addEvent(ticketId, { kind, authorRole, author, body = null, status = null, messageId = null }, at) {
-    const r = db
-      .prepare(
-        "INSERT INTO support_ticket_events(ticket_id,kind,author_role,author,body,status,message_id,created_at) VALUES(?,?,?,?,?,?,?,?)",
-      )
-      .run(ticketId, kind, authorRole, author, body, status, messageId, at);
-    return Number(r.lastInsertRowid);
+  function makeTicketCode() {
+    const suffix = crypto.randomBytes(3).toString("hex").toUpperCase();
+    return `TKT-${suffix}`;
   }
 
-  function rowById(id) {
-    return db.prepare("SELECT * FROM support_tickets WHERE id=?").get(String(id || ""));
-  }
-  function rowByNumber(no) {
-    return db.prepare("SELECT * FROM support_tickets WHERE ticket_no=?").get(String(no || "").toUpperCase());
-  }
-
-  // Creates a ticket. A repeated submissionKey returns the existing ticket (double tap, retry, or the same
-  // Gmail message seen twice), so nothing is saved or emailed twice.
-  // photo is optional: pass null for a ticket made from an email with no attachment.
-  function create({ portalType, signedIn, account, name, email, phone, description, photo, submissionKey, subject }) {
-    if (submissionKey) {
-      const existing = db.prepare("SELECT * FROM support_tickets WHERE submission_key=?").get(submissionKey);
-      if (existing) return { ticket: existing, duplicate: true };
-    }
-    // A ticket can only belong to an account of the portal it was sent from.
-    if (account) {
-      const owner = partnerPortalType(account.role);
-      if (owner && portalType !== owner)
-        throw new SupportError(403, "This request does not match the portal you are signed in to.");
-    }
-    let mime = "";
-    if (photo) {
-      mime = detectImageType(photo.buffer) || "";
-      if (!mime) throw new SupportError(400, "The attachment must be a JPG, PNG or WEBP image.", "photo");
-      if (photo.buffer.length > SUPPORT_PHOTO_MAX_BYTES)
-        throw new SupportError(400, "The photo is too large. Please attach an image under 8 MB.", "photo");
-    }
-    const id = crypto.randomUUID();
-    const now = new Date();
-    const at = now.toISOString();
-    const photoRel = photo ? path.join("support", `${id}.${PHOTO_EXT[mime]}`) : "";
-    const photoAbs = photo ? path.join(uploadDir, photoRel) : "";
-    if (photo) fs.writeFileSync(photoAbs, photo.buffer, { mode: 0o600 });
-    const text = String(description || "").trim().slice(0, TEXT_LIMITS.description);
-    try {
-      const ticket = tx(() => {
-        const ticketNo = nextTicketNo(now);
-        db.prepare(`INSERT INTO support_tickets(
-            id,ticket_no,portal_type,signed_in,account_id,account_login,customer_name,email,phone,description,
-            photo_path,photo_mime,photo_name,photo_size,status,submission_key,submitted_at,updated_at,notify_status)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-          id,
-          ticketNo,
-          portalType,
-          signedIn ? 1 : 0,
-          account ? account.id : null,
-          account ? account.login_id : null,
-          clean(name, TEXT_LIMITS.name) || clean(email, TEXT_LIMITS.email),
-          clean(email, TEXT_LIMITS.email),
-          clean(phone, TEXT_LIMITS.phone) || null,
-          text,
-          photoRel,
-          mime,
-          photo ? path.basename(photo.originalname || "support-photo").slice(0, 100) : clean(subject, 120),
-          photo ? photo.buffer.length : 0,
-          "New",
-          submissionKey || null,
-          at,
-          at,
-          "pending",
-        );
-        addEvent(
-          id,
-          {
-            kind: "submitted",
-            authorRole: portalType === "Vendor" || portalType === "Franchise" ? portalType.toLowerCase() : "customer",
-            author: account ? account.login_id : clean(email, TEXT_LIMITS.email),
-            body: text,
-          },
-          at,
-        );
-        return db.prepare("SELECT * FROM support_tickets WHERE id=?").get(id);
-      });
-      return { ticket, duplicate: false };
-    } catch (e) {
-      if (photoAbs) fs.rmSync(photoAbs, { force: true });
-      if (submissionKey && /UNIQUE/i.test(String(e.message))) {
-        const existing = db.prepare("SELECT * FROM support_tickets WHERE submission_key=?").get(submissionKey);
-        if (existing) return { ticket: existing, duplicate: true };
-      }
-      throw e;
-    }
-  }
-
-  // The conversation for one ticket, oldest first.
-  function events(ticketId) {
+  async function getTicketById(ticketId) {
     return db
-      .prepare("SELECT * FROM support_ticket_events WHERE ticket_id=? ORDER BY id")
-      .all(ticketId)
-      .map((e) => ({
-        id: e.id,
-        kind: e.kind,
-        authorRole: e.author_role,
-        author: e.author,
-        body: e.body || "",
-        status: e.status || "",
-        messageId: e.message_id || "",
-        createdAt: e.created_at,
-      }));
+      .prepare("SELECT * FROM support_tickets WHERE id=?")
+      .get(String(ticketId || ""));
   }
 
-  function publicTicket(row) {
-    const lastReply = db
-      .prepare("SELECT body, author, created_at FROM support_ticket_events WHERE ticket_id=? AND kind='reply' ORDER BY id DESC LIMIT 1")
-      .get(row.id);
-    const hasPhoto = !!row.photo_path;
-    // True when the customer has written (by email or in the portal) after the last admin reply.
-    const last = (kinds) =>
-      db
-        .prepare(`SELECT id, created_at FROM support_ticket_events WHERE ticket_id=? AND kind IN (${kinds.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 1`)
-        .get(row.id, ...kinds);
-    const lastCustomer = last(["customer_email", "followup"]);
-    const lastAdmin = last(["reply"]);
-    const awaitingReply = !!lastCustomer && (!lastAdmin || lastCustomer.id > lastAdmin.id);
-    return {
-      awaitingReply,
-      lastCustomerMessageAt: lastCustomer ? lastCustomer.created_at : "",
-      id: row.id,
-      ticketId: row.ticket_no,
-      portalType: row.portal_type,
-      signedIn: !!row.signed_in,
-      accountLogin: row.account_login || "",
-      customerName: row.customer_name,
-      email: row.email,
-      phone: row.phone || "",
-      description: row.description,
-      subject: hasPhoto ? "" : row.photo_name || "",
-      photo: hasPhoto ? { name: row.photo_name || "", mime: row.photo_mime, size: row.photo_size } : null,
-      status: row.status,
-      adminResponse: lastReply ? lastReply.body : "",
-      adminResponseAt: lastReply ? lastReply.created_at : "",
-      submittedAt: row.submitted_at,
-      updatedAt: row.updated_at,
-      resolvedAt: row.resolved_at || "",
-    };
-  }
-
-  function summaryCounts() {
-    const counts = Object.fromEntries(SUPPORT_STATUSES.map((s) => [s, 0]));
-    for (const r of db.prepare("SELECT status, COUNT(*) AS n FROM support_tickets GROUP BY status").all())
-      counts[r.status] = (counts[r.status] || 0) + r.n;
-    return {
-      total: Object.values(counts).reduce((a, b) => a + b, 0),
-      new: counts.New,
-      pending: counts.Pending,
-      inProgress: counts["In Progress"],
-      resolved: counts.Resolved,
-      rejectedClosed: counts.Rejected + counts.Closed,
-    };
-  }
-
-  // ----- admin side -----
-  function listForAdmin({ status = "", portal = "", q = "" } = {}) {
-    const where = [];
-    const args = [];
-    if (status && SUPPORT_STATUSES.includes(status)) {
-      where.push("status=?");
-      args.push(status);
-    }
-    if (portal && SUPPORT_PORTAL_TYPES.includes(portal)) {
-      where.push("portal_type=?");
-      args.push(portal);
-    }
-    const term = String(q || "").trim().toLowerCase();
-    if (term) {
-      where.push(
-        "(LOWER(ticket_no) LIKE ? OR LOWER(customer_name) LIKE ? OR LOWER(email) LIKE ? OR LOWER(COALESCE(phone,'')) LIKE ? OR LOWER(COALESCE(account_login,'')) LIKE ?)",
+  async function getTicketByCode(ticketCode) {
+    return db
+      .prepare("SELECT * FROM support_tickets WHERE upper(ticket_code)=?")
+      .get(
+        String(ticketCode || "")
+          .trim()
+          .toUpperCase(),
       );
-      const like = `%${term}%`;
-      args.push(like, like, like, like, like);
+  }
+
+  async function listTickets({
+    status = "",
+    requesterId = "",
+    search = "",
+    limit = 100,
+  } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
+    const clauses = [];
+    const params = [];
+
+    if (status && ALLOWED_STATUSES.has(String(status))) {
+      clauses.push("status=?");
+      params.push(String(status));
     }
-    const sql = `SELECT * FROM support_tickets${where.length ? " WHERE " + where.join(" AND ") : ""} ORDER BY submitted_at DESC LIMIT 1000`;
-    return { summary: summaryCounts(), tickets: db.prepare(sql).all(...args).map(publicTicket) };
-  }
+    if (requesterId) {
+      clauses.push("requester_id=?");
+      params.push(String(requesterId));
+    }
+    if (search) {
+      const q = `%${String(search).trim().toLowerCase()}%`;
+      clauses.push(
+        "(lower(ticket_code) LIKE ? OR lower(subject) LIKE ? OR lower(coalesce(requester_name,'')) LIKE ? OR lower(coalesce(requester_email,'')) LIKE ?)",
+      );
+      params.push(q, q, q, q);
+    }
 
-  function getForAdmin(id) {
-    const row = rowById(id);
-    if (!row) throw new SupportError(404, "Ticket not found.");
-    return { ticket: publicTicket(row), events: events(row.id) };
-  }
+    const whereSql = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    params.push(safeLimit);
 
-  function touch(id, status, at, resolvedAt = null) {
-    db.prepare("UPDATE support_tickets SET status=?, updated_at=?, resolved_at=? WHERE id=?").run(status, at, resolvedAt, id);
-  }
-
-  // Saves an admin reply. Returns the event id, so the email to the customer can be linked to it.
-  function adminReply(id, actor, body) {
-    const text = String(body || "").trim().slice(0, TEXT_LIMITS.reply);
-    if (!text) throw new SupportError(400, "Please type your reply before sending.", "reply");
-    const row = rowById(id);
-    if (!row) throw new SupportError(404, "Ticket not found.");
-    const at = new Date().toISOString();
-    const eventId = tx(() => {
-      const eid = addEvent(row.id, { kind: "reply", authorRole: "admin", author: actor, body: text }, at);
-      // A reply moves a brand-new ticket into progress; other statuses are left for the admin to set.
-      touch(row.id, row.status === "New" ? "In Progress" : row.status, at, row.resolved_at);
-      return eid;
-    });
-    return { eventId, ticket: rowById(row.id), detail: getForAdmin(row.id) };
-  }
-
-  function setStatus(id, actor, status, note = "") {
-    if (!SUPPORT_STATUSES.includes(status)) throw new SupportError(400, "Unknown status.", "status");
-    const row = rowById(id);
-    if (!row) throw new SupportError(404, "Ticket not found.");
-    const at = new Date().toISOString();
-    tx(() => {
-      touch(row.id, status, at, FINISHED.includes(status) ? at : null);
-      addEvent(row.id, {
-        kind: "status",
-        authorRole: "admin",
-        author: actor,
-        body: String(note || "").trim().slice(0, TEXT_LIMITS.reply) || null,
-        status,
-      }, at);
-    });
-    return getForAdmin(row.id);
-  }
-
-  // A customer's email (or a partner follow-up) added to an existing ticket. A finished ticket is reopened.
-  function addMessage(ticketRow, { kind, author, authorRole, body, messageId = null }) {
-    const text = String(body || "").trim().slice(0, TEXT_LIMITS.followUp) || "(no text in this message)";
-    const at = new Date().toISOString();
-    const eventId = tx(() => {
-      const eid = addEvent(ticketRow.id, { kind, authorRole, author, body: text, messageId }, at);
-      touch(ticketRow.id, FINISHED.includes(ticketRow.status) ? "Pending" : ticketRow.status, at, null);
-      return eid;
-    });
-    return { eventId, ticket: rowById(ticketRow.id), detail: getForAdmin(ticketRow.id) };
-  }
-
-  // Finds the ticket an email reply belongs to, from the Message-IDs of our earlier emails.
-  function ticketForMessageRefs(refs) {
-    const ids = refs.map((r) => String(r || "").trim()).filter(Boolean);
-    if (!ids.length) return null;
-    const marks = ids.map(() => "?").join(",");
-    const row = db
-      .prepare(`SELECT ticket_id FROM support_ticket_events WHERE message_id IN (${marks}) ORDER BY id DESC LIMIT 1`)
-      .get(...ids);
-    return row ? rowById(row.ticket_id) : null;
-  }
-
-  // Photo to serve, or null. A path can only point inside the support photo folder.
-  function photoFor(row) {
-    if (!row || !row.photo_path) return null;
-    const abs = path.join(uploadDir, row.photo_path);
-    if (!abs.startsWith(path.join(uploadDir, "support") + path.sep)) return null;
-    return { abs, mime: row.photo_mime, name: row.photo_name || "support-photo" };
-  }
-
-  // ----- partner side (vendor / franchise) -----
-  // Every partner query is limited to the verified account AND that account's portal type. The account comes
-  // from the server-side session (never from the request body), so a vendor can never reach a franchise ticket.
-  function partnerScope(account) {
-    const portalType = partnerPortalType(account && account.role);
-    if (!account || !account.id || !portalType)
-      throw new SupportError(403, "Only vendor and franchise accounts can use My Support Requests.");
-    return { accountId: account.id, portalType };
-  }
-
-  // The ticket row, if this account of this portal owns it. Otherwise null (never reveals other tickets).
-  function rowForAccount(id, account) {
-    const { accountId, portalType } = partnerScope(account);
-    const row = rowById(id);
-    if (!row || row.account_id !== accountId || row.portal_type !== portalType) return null;
-    return row;
-  }
-
-  function listForAccount(account) {
-    const { accountId, portalType } = partnerScope(account);
     return db
       .prepare(
-        "SELECT * FROM support_tickets WHERE account_id=? AND portal_type=? ORDER BY submitted_at DESC LIMIT 500",
+        `SELECT * FROM support_tickets ${whereSql} ORDER BY updated_at DESC LIMIT ?`,
       )
-      .all(accountId, portalType)
-      .map(publicTicket);
+      .all(...params);
   }
 
-  function getForAccount(id, account) {
-    const row = rowForAccount(id, account);
-    if (!row) throw new SupportError(404, "Ticket not found.");
-    return { ticket: publicTicket(row), events: events(row.id).filter((e) => e.kind !== "email_out") };
+  async function listEvents(ticketId) {
+    const rows = await db
+      .prepare(
+        "SELECT * FROM support_ticket_events WHERE ticket_id=? ORDER BY created_at ASC",
+      )
+      .all(String(ticketId || ""));
+    return rows.map((r) => {
+      let parsedMeta = null;
+      if (r.meta) {
+        try {
+          parsedMeta = JSON.parse(r.meta);
+        } catch {
+          parsedMeta = null;
+        }
+      }
+      return { ...r, meta: parsedMeta };
+    });
   }
 
-  // A partner adds more information to its own ticket.
-  function partnerFollowUp(id, account, body) {
-    const text = String(body || "").trim().slice(0, TEXT_LIMITS.followUp);
-    if (!text) throw new SupportError(400, "Please write your follow-up message.", "message");
-    const row = rowForAccount(id, account);
-    if (!row) throw new SupportError(404, "Ticket not found.");
-    if (row.status === "Closed") throw new SupportError(409, "This ticket is closed. Please submit a new support request.");
-    const r = addMessage(row, { kind: "followup", authorRole: account.role, author: account.login_id, body: text });
-    return { eventId: r.eventId, ticket: r.ticket, detail: getForAccount(row.id, account) };
+  async function addEvent({
+    ticketId,
+    eventType = "message",
+    actorRole = "",
+    actorId = "",
+    actorName = "",
+    body = "",
+    meta = null,
+    messageId = null,
+  }) {
+    const id = crypto.randomUUID();
+    const createdAt = nowIso();
+    const normalizedMessageId = messageId ? cleanText(messageId, 300) : null;
+
+    if (normalizedMessageId) {
+      const existing = await db
+        .prepare(
+          "SELECT * FROM support_ticket_events WHERE ticket_id=? AND message_id=?",
+        )
+        .get(String(ticketId), normalizedMessageId);
+      if (existing) return existing;
+    }
+
+    await db
+      .prepare(
+        `INSERT INTO support_ticket_events(
+          id, ticket_id, event_type, actor_role, actor_id, actor_name, body, meta, message_id, created_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        id,
+        String(ticketId),
+        cleanText(eventType, 60) || "message",
+        cleanText(actorRole, 40),
+        cleanText(actorId, 120),
+        cleanText(actorName, 160),
+        cleanText(body, 10_000),
+        meta ? JSON.stringify(meta) : null,
+        normalizedMessageId,
+        createdAt,
+      );
+
+    await db
+      .prepare("UPDATE support_tickets SET updated_at=? WHERE id=?")
+      .run(createdAt, String(ticketId));
+
+    return db.prepare("SELECT * FROM support_ticket_events WHERE id=?").get(id);
+  }
+
+  async function createTicket({
+    subject,
+    category = "general",
+    priority = "normal",
+    body = "",
+    requesterRole = "",
+    requesterId = "",
+    requesterName = "",
+    requesterEmail = "",
+    attachments = [],
+    messageId = null,
+  }) {
+    const cleanSubject = cleanText(subject, 240);
+    if (!cleanSubject) {
+      throw new Error("Ticket subject is required.");
+    }
+
+    const normalizedPriority = ALLOWED_PRIORITIES.has(
+      String(priority || "").toLowerCase(),
+    )
+      ? String(priority).toLowerCase()
+      : "normal";
+
+    const id = crypto.randomUUID();
+    let ticketCode = makeTicketCode();
+    while (await getTicketByCode(ticketCode)) {
+      ticketCode = makeTicketCode();
+    }
+
+    const createdAt = nowIso();
+    await db
+      .prepare(
+        `INSERT INTO support_tickets(
+          id, ticket_code, subject, category, priority, status,
+          requester_role, requester_id, requester_name, requester_email,
+          assigned_to, created_at, updated_at, closed_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        id,
+        ticketCode,
+        cleanSubject,
+        cleanText(category, 80) || "general",
+        normalizedPriority,
+        "open",
+        cleanText(requesterRole, 40),
+        cleanText(requesterId, 120),
+        cleanText(requesterName, 160),
+        cleanText(requesterEmail, 254),
+        null,
+        createdAt,
+        createdAt,
+        null,
+      );
+
+    const event = await addEvent({
+      ticketId: id,
+      eventType: "created",
+      actorRole: requesterRole,
+      actorId: requesterId,
+      actorName: requesterName,
+      body: cleanText(body, 10_000) || cleanSubject,
+      messageId,
+    });
+
+    const savedAttachments = [];
+    for (const file of Array.isArray(attachments) ? attachments : []) {
+      if (!file || !file.buffer || !file.size) continue;
+      const saved = await saveAttachment({
+        ticketId: id,
+        eventId: event.id,
+        file,
+      });
+      savedAttachments.push(saved);
+    }
+
+    const ticket = await getTicketById(id);
+    return { ticket, event, attachments: savedAttachments };
+  }
+
+  async function updateStatus({
+    ticketId,
+    status,
+    actorRole = "",
+    actorId = "",
+    actorName = "",
+    note = "",
+  }) {
+    const normalized = String(status || "")
+      .trim()
+      .toLowerCase();
+    if (!ALLOWED_STATUSES.has(normalized)) {
+      throw new Error("Invalid support ticket status.");
+    }
+    const existing = await getTicketById(ticketId);
+    if (!existing) return null;
+
+    const updatedAt = nowIso();
+    const closedAt =
+      normalized === "closed" || normalized === "resolved"
+        ? existing.closed_at || updatedAt
+        : null;
+
+    await db
+      .prepare(
+        "UPDATE support_tickets SET status=?, updated_at=?, closed_at=? WHERE id=?",
+      )
+      .run(normalized, updatedAt, closedAt, existing.id);
+
+    await addEvent({
+      ticketId: existing.id,
+      eventType: "status_changed",
+      actorRole,
+      actorId,
+      actorName,
+      body:
+        cleanText(note, 2000) ||
+        `Status changed from ${existing.status} to ${normalized}.`,
+      meta: { from: existing.status, to: normalized },
+    });
+
+    return getTicketById(existing.id);
+  }
+
+  async function saveAttachment({ ticketId, eventId = null, file }) {
+    const attId = crypto.randomUUID();
+    const ext = path.extname(String(file.originalname || "")).slice(0, 12);
+    const storedName = `${attId}${ext}`;
+    const ticketDir = path.join(supportUploadRoot, String(ticketId));
+    fs.mkdirSync(ticketDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(ticketDir, storedName), file.buffer, {
+      mode: 0o600,
+    });
+
+    const createdAt = nowIso();
+    const safeName =
+      path
+        .basename(String(file.originalname || "attachment"))
+        .replace(/[^\w.\- ()]/g, "_")
+        .slice(0, 120) || "attachment";
+
+    await db
+      .prepare(
+        `INSERT INTO support_ticket_attachments(
+          id, ticket_id, event_id, original_name, mime, size, stored_name, created_at
+        ) VALUES(?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        attId,
+        String(ticketId),
+        eventId ? String(eventId) : null,
+        safeName,
+        cleanText(file.mimetype, 120) || "application/octet-stream",
+        Number(file.size || 0),
+        storedName,
+        createdAt,
+      );
+
+    return db
+      .prepare("SELECT * FROM support_ticket_attachments WHERE id=?")
+      .get(attId);
+  }
+
+  async function listAttachments(ticketId) {
+    return db
+      .prepare(
+        "SELECT * FROM support_ticket_attachments WHERE ticket_id=? ORDER BY created_at ASC",
+      )
+      .all(String(ticketId || ""));
+  }
+
+  async function getAttachment(attachmentId) {
+    return db
+      .prepare("SELECT * FROM support_ticket_attachments WHERE id=?")
+      .get(String(attachmentId || ""));
   }
 
   return {
-    create,
-    rowById,
-    rowByNumber,
-    publicTicket,
-    summaryCounts,
-    listForAdmin,
-    getForAdmin,
-    adminReply,
-    setStatus,
-    addMessage,
-    ticketForMessageRefs,
-    photoFor,
-    listForAccount,
-    getForAccount,
-    rowForAccount,
-    partnerFollowUp,
-    events,
-    clean,
-    TEXT_LIMITS,
+    createTicket,
+    addEvent,
+    updateStatus,
+    getTicketById,
+    getTicketByCode,
+    listTickets,
+    listEvents,
+    saveAttachment,
+    listAttachments,
+    getAttachment,
   };
 }
