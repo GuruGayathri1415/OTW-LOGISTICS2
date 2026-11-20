@@ -13,6 +13,14 @@ export const SUPPORT_STATUSES = [
   "closed",
 ];
 
+export const TICKET_NO_PATTERN = /\b(?:TKT|SUP|OTW)-\d{4,10}\b|\bTKT-[A-F0-9]{6}\b/i;
+
+export function sameAddress(a, b) {
+  const left = String(a || "").trim().toLowerCase();
+  const right = String(b || "").trim().toLowerCase();
+  return Boolean(left) && left === right;
+}
+
 const ALLOWED_STATUSES = new Set(SUPPORT_STATUSES);
 const ALLOWED_PRIORITIES = new Set(["low", "normal", "high", "urgent"]);
 
