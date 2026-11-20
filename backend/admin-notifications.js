@@ -7,8 +7,6 @@
 // The admin email is sent after the application and notification are saved. A failed send is kept as
 // "failed" with its reason and retried with a growing wait (processDue, called by server.js). The
 // application and the dashboard notification are never rolled back because of email.
-//
-// Works with better-sqlite3 (server.js) and node:sqlite (tests): only prepare/run/get/all are used.
 
 import crypto from "node:crypto";
 
@@ -88,17 +86,17 @@ export function adminApplicationEmail(app, { dashboardUrl = "", status = "Pendin
 const EMAIL_OK = /^[^\s@<>()",;:]+@[^\s@<>()",;:]+\.[^\s@<>()",;:]+$/;
 const safeError = (e) => oneLine(e?.message || String(e || "send failed")).slice(0, 300);
 
-export function createAdminNotifications({
+export async function createAdminNotifications({
   db,
   transport,
   recipients = () => [],
-  audit = () => {},
+  audit = async () => {},
   log = console,
   now = () => new Date(),
   maxAttempts = MAX_EMAIL_ATTEMPTS,
   onCreated = () => {},
 }) {
-  db.exec(`CREATE TABLE IF NOT EXISTS admin_notifications(
+  await db.exec(`CREATE TABLE IF NOT EXISTS admin_notifications(
       id TEXT PRIMARY KEY,
       application_id TEXT NOT NULL UNIQUE,
       app_id TEXT NOT NULL,
@@ -123,8 +121,8 @@ export function createAdminNotifications({
   const inFlight = new Set();
   const iso = () => now().toISOString();
 
-  function loadRow(notificationId) {
-    return db
+  async function loadRow(notificationId, executor = db) {
+    return executor
       .prepare(
         `SELECT n.*, a.name, a.mobile, a.email, a.status AS application_status, a.submitted_at, a.app_id AS saved_app_id, a.type AS saved_type
          FROM admin_notifications n JOIN partner_applications a ON a.id = n.application_id WHERE n.id = ?`,
@@ -135,13 +133,13 @@ export function createAdminNotifications({
   // Creates the notification for a saved application. Safe to call twice: the second call changes nothing.
   // Returns {id, created}. Throws if the application is not in the database (a notification must never
   // exist without its application).
-  function create({ applicationId, dashboardBase = "" }) {
-    const app = db
+  async function create({ applicationId, dashboardBase = "" }, executor = db) {
+    const app = await executor
       .prepare("SELECT id, app_id, type FROM partner_applications WHERE id = ?")
       .get(applicationId);
     if (!app) throw new Error("Application is not saved; no notification created.");
     const id = crypto.randomUUID();
-    const result = db
+    const result = await executor
       .prepare(
         `INSERT INTO admin_notifications(id,application_id,app_id,application_type,dashboard_base,created_at,email_status)
          VALUES(?,?,?,?,?,?,'pending') ON CONFLICT(application_id) DO NOTHING`,
@@ -149,7 +147,7 @@ export function createAdminNotifications({
       .run(id, app.id, app.app_id, app.type, String(dashboardBase || ""), iso());
     const created = Number(result?.changes || 0) === 1;
     if (!created) {
-      const existing = db
+      const existing = await executor
         .prepare("SELECT id FROM admin_notifications WHERE application_id = ?")
         .get(app.id);
       return { id: existing.id, created: false };
@@ -159,16 +157,15 @@ export function createAdminNotifications({
   }
 
   // Unread = not deleted by this admin and not marked read by this admin.
-  function unreadCount(accountId) {
-    return Number(
-      db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM admin_notifications n
-           LEFT JOIN admin_notification_states s ON s.notification_id = n.id AND s.account_id = ?
-           WHERE COALESCE(s.deleted_at,'') = '' AND s.read_at IS NULL`,
-        )
-        .get(accountId)?.n || 0,
-    );
+  async function unreadCount(accountId) {
+    const row = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM admin_notifications n
+         LEFT JOIN admin_notification_states s ON s.notification_id = n.id AND s.account_id = ?
+         WHERE COALESCE(s.deleted_at,'') = '' AND s.read_at IS NULL`,
+      )
+      .get(accountId);
+    return Number(row?.n || 0);
   }
 
   function toItem(r) {
@@ -195,8 +192,8 @@ export function createAdminNotifications({
   }
 
   // Filters: type = Vendor | Franchise; status = New (unread) | Pending | Approved | Rejected.
-  function list(accountId, { type = "", status = "", limit = 500 } = {}) {
-    const rows = db
+  async function list(accountId, { type = "", status = "", limit = 500 } = {}) {
+    const rows = await db
       .prepare(
         `SELECT n.id, n.application_id, n.app_id, n.application_type, n.created_at, n.email_status, n.email_attempts,
                 n.email_error, n.email_sent_at, a.name, a.mobile, a.email, a.status AS application_status,
@@ -221,48 +218,65 @@ export function createAdminNotifications({
             : n.status === wantStatus,
       )
       .slice(0, Math.max(1, Math.min(Number(limit) || 500, 1000)));
-    return { items, unreadCount: unreadCount(accountId) };
+    return { items, unreadCount: await unreadCount(accountId) };
   }
 
-  function exists(notificationId, accountId) {
-    return !!db
+  async function exists(notificationId, accountId) {
+    const row = await db
       .prepare(
         `SELECT n.id FROM admin_notifications n
          LEFT JOIN admin_notification_states s ON s.notification_id = n.id AND s.account_id = ?
          WHERE n.id = ? AND COALESCE(s.deleted_at,'') = ''`,
       )
       .get(accountId, notificationId);
+    return !!row;
   }
 
   // read=true marks read; read=false marks unread. Returns false when the notification is unknown to this admin.
-  function setRead(accountId, notificationId, read) {
-    if (!exists(notificationId, accountId)) return false;
-    db.prepare(
-      `INSERT INTO admin_notification_states(notification_id,account_id,read_at) VALUES(?,?,?)
-       ON CONFLICT(notification_id,account_id) DO UPDATE SET read_at=excluded.read_at`,
-    ).run(notificationId, accountId, read ? iso() : null);
+  async function setRead(accountId, notificationId, read) {
+    if (!(await exists(notificationId, accountId))) return false;
+    await db
+      .prepare(
+        `INSERT INTO admin_notification_states(notification_id,account_id,read_at) VALUES(?,?,?)
+         ON CONFLICT(notification_id,account_id) DO UPDATE SET read_at=excluded.read_at`,
+      )
+      .run(notificationId, accountId, read ? iso() : null);
     return true;
   }
 
   // Removes the notification from this admin's list only.
-  function remove(accountId, notificationId) {
-    if (!db.prepare("SELECT id FROM admin_notifications WHERE id = ?").get(notificationId)) return false;
-    db.prepare(
-      `INSERT INTO admin_notification_states(notification_id,account_id,read_at,deleted_at) VALUES(?,?,?,?)
-       ON CONFLICT(notification_id,account_id) DO UPDATE SET deleted_at=excluded.deleted_at, read_at=COALESCE(admin_notification_states.read_at, excluded.read_at)`,
-    ).run(notificationId, accountId, iso(), iso());
+  async function remove(accountId, notificationId) {
+    const found = await db
+      .prepare("SELECT id FROM admin_notifications WHERE id = ?")
+      .get(notificationId);
+    if (!found) return false;
+    await db
+      .prepare(
+        `INSERT INTO admin_notification_states(notification_id,account_id,read_at,deleted_at) VALUES(?,?,?,?)
+         ON CONFLICT(notification_id,account_id) DO UPDATE SET deleted_at=excluded.deleted_at, read_at=COALESCE(admin_notification_states.read_at, excluded.read_at)`,
+      )
+      .run(notificationId, accountId, iso(), iso());
     return true;
   }
 
-  function recipientList() {
-    return [...new Set((recipients() || []).map((a) => String(a || "").trim()).filter((a) => EMAIL_OK.test(a)))];
+  async function recipientList() {
+    const raw = typeof recipients === "function" ? await recipients() : recipients;
+    return [
+      ...new Set(
+        (raw || [])
+          .map((a) => String(a || "").trim())
+          .filter((a) => EMAIL_OK.test(a)),
+      ),
+    ];
   }
 
-  function markFailed(notificationId, attempts, reason) {
+  async function markFailed(notificationId, attempts, reason) {
     const wait = Math.min(2 ** attempts, 60); // minutes: 2, 4, 8, 16, 32
-    db.prepare(
-      "UPDATE admin_notifications SET email_status='failed', email_attempts=?, email_error=?, next_email_at=? WHERE id=?",
-    ).run(attempts, reason, new Date(now().getTime() + wait * 60_000).toISOString(), notificationId);
+    await db
+      .prepare(
+        "UPDATE admin_notifications SET email_status='failed', email_attempts=?, email_error=?, next_email_at=? WHERE id=?",
+      )
+      .run(attempts, reason, new Date(now().getTime() + wait * 60_000).toISOString(), notificationId);
     return { sent: false, reason };
   }
 
@@ -271,11 +285,11 @@ export function createAdminNotifications({
     if (inFlight.has(notificationId)) return null;
     inFlight.add(notificationId);
     try {
-      const n = loadRow(notificationId);
+      const n = await loadRow(notificationId);
       if (!n) return null;
       if (n.email_status === "sent") return { sent: true, reason: "" };
       const attempts = Number(n.email_attempts || 0) + 1;
-      const to = recipientList();
+      const to = await recipientList();
       if (!to.length)
         return markFailed(
           notificationId,
@@ -294,13 +308,15 @@ export function createAdminNotifications({
       } catch (err) {
         const reason = safeError(err);
         log.error?.(`[admin-notification] email failed for ${n.app_id}: ${reason}`);
-        audit(actor, "admin_notification_email_failed", { appId: n.app_id, attempts, reason });
+        await audit(actor, "admin_notification_email_failed", { appId: n.app_id, attempts, reason });
         return markFailed(notificationId, attempts, reason);
       }
-      db.prepare(
-        "UPDATE admin_notifications SET email_status='sent', email_attempts=?, email_error='', email_sent_at=?, next_email_at=NULL WHERE id=?",
-      ).run(attempts, iso(), notificationId);
-      audit(actor, "admin_notification_email_sent", { appId: n.app_id, attempts, recipients: to.length });
+      await db
+        .prepare(
+          "UPDATE admin_notifications SET email_status='sent', email_attempts=?, email_error='', email_sent_at=?, next_email_at=NULL WHERE id=?",
+        )
+        .run(attempts, iso(), notificationId);
+      await audit(actor, "admin_notification_email_sent", { appId: n.app_id, attempts, recipients: to.length });
       return { sent: true, reason: "" };
     } finally {
       inFlight.delete(notificationId);
@@ -309,7 +325,7 @@ export function createAdminNotifications({
 
   // Retry worker: sends emails that are pending or failed, not yet at the attempt limit, and due.
   async function processDue() {
-    const due = db
+    const due = await db
       .prepare(
         `SELECT id FROM admin_notifications
          WHERE email_status IN ('pending','failed') AND email_attempts < ?
@@ -322,8 +338,8 @@ export function createAdminNotifications({
   }
 
   // Lets an admin see whether the email went out and why it did not.
-  function emailStatusOf(notificationId) {
-    const n = loadRow(notificationId);
+  async function emailStatusOf(notificationId) {
+    const n = await loadRow(notificationId);
     return n ? { status: n.email_status, attempts: n.email_attempts, error: n.email_error } : null;
   }
 
