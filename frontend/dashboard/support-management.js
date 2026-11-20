@@ -4,8 +4,25 @@
 // Data comes from backend/support-routes.js. Uses globals from app.js: $, esc, layout, stat, toast, openModal,
 // fmtDate, currentPage, PARTNER_API_BASE, sessionEnded.
 
-const supStore = { tickets: [], summary: null, error: "", status: "", portal: "", q: "", open: null, inbound: null, photoUrl: "" };
-const SUP_TICKET_STATUSES = ["New", "Pending", "In Progress", "Resolved", "Rejected", "Closed"];
+const supStore = {
+  tickets: [],
+  summary: null,
+  error: "",
+  status: "",
+  portal: "",
+  q: "",
+  open: null,
+  inbound: null,
+  photoUrl: "",
+};
+const SUP_TICKET_STATUSES = [
+  "New",
+  "Pending",
+  "In Progress",
+  "Resolved",
+  "Rejected",
+  "Closed",
+];
 
 async function supRequest(path, { method = "GET", body } = {}) {
   let r;
@@ -17,7 +34,9 @@ async function supRequest(path, { method = "GET", body } = {}) {
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
-    throw new Error("The server is not reachable. Check that it is running and try again.");
+    throw new Error(
+      "The server is not reachable. Check that it is running and try again.",
+    );
   }
   const out = await r.json().catch(() => ({}));
   if (r.status === 401) {
@@ -34,10 +53,13 @@ async function supRequest(path, { method = "GET", body } = {}) {
 
 const badgeFor = (s) => {
   const cls =
-    s === "Resolved" || s === "Closed" || s === "Sent" ? "success"
-    : s === "Rejected" || s === "Failed" ? "danger"
-    : s === "New" || s === "Pending" || s === "Retrying" || s === "Sending" ? "warning"
-    : "";
+    s === "Resolved" || s === "Closed" || s === "Sent"
+      ? "success"
+      : s === "Rejected" || s === "Failed"
+        ? "danger"
+        : s === "New" || s === "Pending" || s === "Retrying" || s === "Sending"
+          ? "warning"
+          : "";
   return `<span class="badge ${cls}">${esc(s)}</span>`;
 };
 const shortText = (v, n = 90) => {
@@ -128,7 +150,9 @@ function supPaintInbound() {
   const state = i.enabled
     ? `<span class="badge success">Connected</span> Reading incoming mail for <b>${esc(i.mailbox || "")}</b>.${i.lastPollAt ? ` Last checked ${esc(fmtDate(i.lastPollAt))}.` : ""}`
     : `<span class="badge warning">Not connected</span> ${esc(i.setupNote || "")}`;
-  const err = i.lastError ? `<p class="support-status error">Last inbox check failed: ${esc(i.lastError)}</p>` : "";
+  const err = i.lastError
+    ? `<p class="support-status error">Last inbox check failed: ${esc(i.lastError)}</p>`
+    : "";
   box.innerHTML = `<div class="hub-list-toolbar"><div><h3>Incoming customer email</h3><p>${state}</p></div>
     <div class="actions"><button class="secondary" id="supCheckInbox" ${i.enabled ? "" : "disabled"}>Check inbox now</button></div></div>${err}`;
   const btn = $("#supCheckInbox");
@@ -161,7 +185,8 @@ function supPaint() {
   set("supResolved", s.resolved);
   set("supFailed", s.failedEmails);
   if (supStore.error) {
-    $("#supRows").innerHTML = `<tr><td colspan="12" class="empty error">${esc(supStore.error)}</td></tr>`;
+    $("#supRows").innerHTML =
+      `<tr><td colspan="12" class="empty error">${esc(supStore.error)}</td></tr>`;
     return;
   }
   $("#supAlert").innerHTML = s.failedEmails
@@ -205,18 +230,31 @@ async function supOpen(id, focusReply = false) {
 
 function supRenderModal(focusReply) {
   const { ticket: t, events, emailJobs = [] } = supStore.open;
-  const who = (ev) => (ev.authorRole === "admin" ? "Admin" : ev.authorRole === "customer" ? "Customer" : ev.author);
+  const who = (ev) =>
+    ev.authorRole === "admin"
+      ? "Admin"
+      : ev.authorRole === "customer"
+        ? "Customer"
+        : ev.author;
   const label = (ev) =>
-    ev.kind === "submitted" ? "Submitted"
-    : ev.kind === "reply" ? "Admin reply"
-    : ev.kind === "customer_email" ? "Customer email"
-    : ev.kind === "followup" ? "Partner follow-up"
-    : "Status changed to " + ev.status;
+    ev.kind === "submitted"
+      ? "Submitted"
+      : ev.kind === "reply"
+        ? "Admin reply"
+        : ev.kind === "customer_email"
+          ? "Customer email"
+          : ev.kind === "followup"
+            ? "Partner follow-up"
+            : "Status changed to " + ev.status;
   const history = events.length
     ? events
-        .map((ev) => `<div class="sup-event" style="margin:8px 0;padding:10px;border-radius:10px;background:rgba(0,0,0,.04)">
+        .map(
+          (
+            ev,
+          ) => `<div class="sup-event" style="margin:8px 0;padding:10px;border-radius:10px;background:rgba(0,0,0,.04)">
             <div><b>${esc(label(ev))}</b> · ${esc(who(ev))} · <span class="muted">${esc(fmtDate(ev.createdAt))}</span></div>
-            ${ev.body ? `<p style="margin:6px 0 0;white-space:pre-wrap">${esc(ev.body)}</p>` : ""}</div>`)
+            ${ev.body ? `<p style="margin:6px 0 0;white-space:pre-wrap">${esc(ev.body)}</p>` : ""}</div>`,
+        )
         .join("")
     : `<p class="muted">No history yet.</p>`;
   const jobs = emailJobs.length
@@ -284,18 +322,38 @@ function bindSupportModal() {
       if (action === "reply") {
         const text = $("#supReplyText").value.trim();
         if (!text) throw new Error("Please type your reply before sending.");
-        const out = await supRequest(`/tickets/${encodeURIComponent(id)}/reply`, { method: "POST", body: { message: text } });
+        const out = await supRequest(
+          `/tickets/${encodeURIComponent(id)}/reply`,
+          { method: "POST", body: { message: text } },
+        );
         supStore.open = out;
-        toast(out.replyEmail?.status === "Sent" ? "Reply emailed to the customer" : "Reply saved. The email is queued or failed; see Emails for this ticket.");
+        toast(
+          out.replyEmail?.status === "Sent"
+            ? "Reply emailed to the customer"
+            : "Reply saved. The email is queued or failed; see Emails for this ticket.",
+        );
       } else if (action === "status") {
-        supStore.open = await supRequest(`/tickets/${encodeURIComponent(id)}/status`, {
-          method: "POST",
-          body: { status: $("#supStatusSelect").value, note: $("#supStatusNote").value.trim() },
-        });
+        supStore.open = await supRequest(
+          `/tickets/${encodeURIComponent(id)}/status`,
+          {
+            method: "POST",
+            body: {
+              status: $("#supStatusSelect").value,
+              note: $("#supStatusNote").value.trim(),
+            },
+          },
+        );
         toast("Ticket status saved");
       } else if (action === "retry") {
-        const out = await supRequest(`/emails/${encodeURIComponent(btn.dataset.job)}/retry`, { method: "POST" });
-        toast(out.job.status === "Sent" ? "Email sent: the server accepted it" : "Retry did not succeed: " + (out.job.lastError || out.job.status));
+        const out = await supRequest(
+          `/emails/${encodeURIComponent(btn.dataset.job)}/retry`,
+          { method: "POST" },
+        );
+        toast(
+          out.job.status === "Sent"
+            ? "Email sent: the server accepted it"
+            : "Retry did not succeed: " + (out.job.lastError || out.job.status),
+        );
         supStore.open = await supRequest("/tickets/" + encodeURIComponent(id));
       }
       supRenderModal(false);
@@ -314,14 +372,19 @@ async function supLoadPhoto(id) {
   const box = $("#supPhoto");
   if (!box) return;
   try {
-    const r = await fetch(`${PARTNER_API_BASE}/api/admin/support/tickets/${encodeURIComponent(id)}/photo`, { credentials: "include" });
+    const r = await fetch(
+      `${PARTNER_API_BASE}/api/admin/support/tickets/${encodeURIComponent(id)}/photo`,
+      { credentials: "include" },
+    );
     if (!r.ok) throw new Error("The photo could not be loaded.");
     if (supStore.photoUrl) URL.revokeObjectURL(supStore.photoUrl);
     supStore.photoUrl = URL.createObjectURL(await r.blob());
     if ($("#supPhoto"))
-      $("#supPhoto").innerHTML = `<a href="${supStore.photoUrl}" target="_blank" rel="noopener"><img src="${supStore.photoUrl}" alt="Photo attached to the support request" style="max-width:100%;border-radius:10px"></a>`;
+      $("#supPhoto").innerHTML =
+        `<a href="${supStore.photoUrl}" target="_blank" rel="noopener"><img src="${supStore.photoUrl}" alt="Photo attached to the support request" style="max-width:100%;border-radius:10px"></a>`;
   } catch (e) {
-    if ($("#supPhoto")) $("#supPhoto").innerHTML = `<span class="error">${esc(e.message)}</span>`;
+    if ($("#supPhoto"))
+      $("#supPhoto").innerHTML = `<span class="error">${esc(e.message)}</span>`;
   }
 }
 

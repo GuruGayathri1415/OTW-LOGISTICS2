@@ -124,10 +124,11 @@ function updateSupportNavRedAlert(openCount) {
 
   if (!badge) {
     badge = document.createElement("span");
-    badge.className = "support-red-badge";
+    badge.className = "support-red-alert";
     btn.appendChild(badge);
   }
-  badge.textContent = supportAlertOpenCount > 99 ? "99+" : String(supportAlertOpenCount);
+  badge.textContent =
+    supportAlertOpenCount > 99 ? "99+" : String(supportAlertOpenCount);
   badge.title = `${supportAlertOpenCount} open support ticket${supportAlertOpenCount === 1 ? "" : "s"}`;
 }
 
@@ -184,7 +185,10 @@ async function checkSupportTicketsAlert({ notifyOnIncrease = true } = {}) {
         ? "http://localhost:8080"
         : location.origin);
 
-    const endpoints = [`${base}/api/admin/support`, `${base}/api/support/tickets`];
+    const endpoints = [
+      `${base}/api/admin/support`,
+      `${base}/api/support/tickets`,
+    ];
     let payload = null;
 
     for (const url of endpoints) {
@@ -413,7 +417,8 @@ function setForgotMode(byEmail) {
       ? "Enter the email registered for your admin account. We will send a reset link to that email."
       : "Reset emails are not available on this server right now. Enter your admin email and your Super Admin will be asked to give you a temporary password.";
   const btn = $("#forgotSubmit");
-  if (btn && !btn.disabled) btn.textContent = byEmail ? "Send reset link" : "Ask the Super Admin";
+  if (btn && !btn.disabled)
+    btn.textContent = byEmail ? "Send reset link" : "Ask the Super Admin";
 }
 function showForgotForm() {
   $("#loginForm").classList.add("hidden");
@@ -594,7 +599,8 @@ function render(page) {
   if (page === "notifications") bindNotifications();
   if (page === "reports") bindReports();
   if (typeof updatePartnerNavCount === "function") updatePartnerNavCount();
-  if (supportAlertOpenCount > 0) updateSupportNavRedAlert(supportAlertOpenCount);
+  if (supportAlertOpenCount > 0)
+    updateSupportNavRedAlert(supportAlertOpenCount);
 }
 function dashboard() {
   const active = db.riders.filter((r) => r.status === "Active").length;
@@ -658,12 +664,17 @@ function dashboardWeeklyStats() {
     (!weeklyStore.loadedAt || Date.now() - weeklyStore.loadedAt > 10000)
   )
     loadWeeklyPayments();
-  const n = (v) => (Number.isFinite(Number(v)) && v !== null && v !== "" ? Number(v) : 0);
+  const n = (v) =>
+    Number.isFinite(Number(v)) && v !== null && v !== "" ? Number(v) : 0;
   const rows = (weeklyStore.rows || []).filter(
-    (r) => String(r.riderId || "").trim() && r.verificationStatus !== "PENDING_VERIFICATION",
+    (r) =>
+      String(r.riderId || "").trim() &&
+      r.verificationStatus !== "PENDING_VERIFICATION",
   );
   const totalOf = (r) =>
-    r.totalOrders === null || r.totalOrders === undefined || r.totalOrders === ""
+    r.totalOrders === null ||
+    r.totalOrders === undefined ||
+    r.totalOrders === ""
       ? n(r.lm) + n(r.primary) + n(r.club)
       : n(r.totalOrders);
   const periods = new Map();
@@ -673,9 +684,18 @@ function dashboardWeeklyStats() {
     pendingCount = 0,
     failedCount = 0;
   for (const r of rows) {
-    const key = r.weekStart ? r.weekStart + ".." + (r.weekEnd || "") : r.weekKey;
+    const key = r.weekStart
+      ? r.weekStart + ".." + (r.weekEnd || "")
+      : r.weekKey;
     if (!periods.has(key))
-      periods.set(key, { key, label: r.week || key, start: r.weekStart || "", total: 0, prime: 0, club: 0 });
+      periods.set(key, {
+        key,
+        label: r.week || key,
+        start: r.weekStart || "",
+        total: 0,
+        prime: 0,
+        club: 0,
+      });
     const p = periods.get(key);
     p.total += totalOf(r);
     p.prime += n(r.primary);
@@ -690,7 +710,9 @@ function dashboardWeeklyStats() {
     if (r.paymentStatus === "FAILED") failedCount++;
   }
   const ordered = [...periods.values()].sort(
-    (a, b) => String(a.start).localeCompare(String(b.start)) || String(a.key).localeCompare(String(b.key)),
+    (a, b) =>
+      String(a.start).localeCompare(String(b.start)) ||
+      String(a.key).localeCompare(String(b.key)),
   );
   const short = (iso, label) => {
     const d = iso ? new Date(iso + "T12:00:00") : null;
@@ -700,7 +722,9 @@ function dashboardWeeklyStats() {
   };
   return {
     latest: ordered.length ? ordered[ordered.length - 1] : null,
-    series: ordered.slice(-7).map((p) => ({ ...p, short: short(p.start, p.label) })),
+    series: ordered
+      .slice(-7)
+      .map((p) => ({ ...p, short: short(p.start, p.label) })),
     totalAmount,
     paidAmount,
     pendingAmount,
@@ -743,7 +767,11 @@ function bindDashboard() {
   $$("[data-go]").forEach((b) => (b.onclick = () => render(b.dataset.go)));
   $("#dashboardRefresh")?.addEventListener("click", async () => {
     syncPartnerApplications();
-    await Promise.all([loadWeeklyPayments(), rrLoad({ quiet: true }), checkSupportTicketsAlert({ notifyOnIncrease: false })]);
+    await Promise.all([
+      loadWeeklyPayments(),
+      rrLoad({ quiet: true }),
+      checkSupportTicketsAlert({ notifyOnIncrease: false }),
+    ]);
     if (currentPage === "dashboard") render("dashboard");
     toast("Dashboard refreshed");
   });
@@ -787,7 +815,9 @@ function riders() {
 }
 function riderAddedBy(r) {
   if (!r.registrationId || !r.appliedBy) return "";
-  const who = [r.appliedBy, r.ownerLoginId, r.ownerName].filter(Boolean).join(" · ");
+  const who = [r.appliedBy, r.ownerLoginId, r.ownerName]
+    .filter(Boolean)
+    .join(" · ");
   return `<br><small class="muted">Added by ${esc(who)}</small>`;
 }
 function riderRowHtml(r) {
@@ -1227,7 +1257,8 @@ async function loadAdminDocs() {
     });
     if (r.status === 401) return sessionEnded();
     const out = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(out.error || "Request failed (" + r.status + ")");
+    if (!r.ok)
+      throw new Error(out.error || "Request failed (" + r.status + ")");
     adminDocs = out.items || [];
     adminDocsLoaded = true;
   } catch (e) {
@@ -1266,8 +1297,10 @@ function docTypeAliases(type) {
     out.push("driving license", "driving licence", "dl");
   if (t === "rc" || t.includes("rc"))
     out.push("rc book", "registration certificate", "vehicle registration");
-  if (t.includes("bank") || t.includes("passbook")) out.push("passbook", "bank passbook", "bank account");
-  if (t.includes("insurance")) out.push("insurance", "insurance document", "policy");
+  if (t.includes("bank") || t.includes("passbook"))
+    out.push("passbook", "bank passbook", "bank account");
+  if (t.includes("insurance"))
+    out.push("insurance", "insurance document", "policy");
   if (t.includes("other")) out.push("other documents", "other");
   return out;
 }
@@ -1338,11 +1371,21 @@ function docMatchesSearch(hay, raw, q) {
   return hay.includes(raw) || (q && normText(hay).includes(q));
 }
 function uploadedDocsRows() {
-  const raw = String(docSearch.query || "").trim().toLowerCase();
+  const raw = String(docSearch.query || "")
+    .trim()
+    .toLowerCase();
   const q = normText(raw);
   return adminDocs.filter((d) => {
     if (!raw) return true;
-    const hay = [d.riderName, d.riderId, d.type, ...docTypeAliases(d.type), d.name, d.selfie?.name, docDate(d.createdAt)]
+    const hay = [
+      d.riderName,
+      d.riderId,
+      d.type,
+      ...docTypeAliases(d.type),
+      d.name,
+      d.selfie?.name,
+      docDate(d.createdAt),
+    ]
       .map((v) => String(v ?? ""))
       .join(" | ")
       .toLowerCase();
@@ -1369,7 +1412,8 @@ function documents() {
     layout(
       "Documents",
       "Upload Aadhaar, PAN, licence, passbook, RC, insurance and other rider documents, with an optional rider selfie.",
-      `<button type="button" class="primary" id="docNewUpload">+ Upload Rider Document</button>` + documentsSearchHtml(),
+      `<button type="button" class="primary" id="docNewUpload">+ Upload Rider Document</button>` +
+        documentsSearchHtml(),
     ) +
     `<div id="docUploadTable">${uploadedDocsTableHtml()}</div><div class="documents-card" id="documentsList">${documentsListHtml()}</div>`
   );
@@ -1419,13 +1463,18 @@ function docRiderChoices() {
 function docFileProblem(file, exts, label, allowedText) {
   if (!file) return "";
   const name = String(file.name || "").toLowerCase();
-  if (!exts.some((x) => name.endsWith(x))) return `The ${label} must be a ${allowedText} file.`;
-  if (file.size > DOC_MAX_UPLOAD) return `The ${label} is larger than 5 MB. Please choose a smaller file.`;
+  if (!exts.some((x) => name.endsWith(x)))
+    return `The ${label} must be a ${allowedText} file.`;
+  if (file.size > DOC_MAX_UPLOAD)
+    return `The ${label} is larger than 5 MB. Please choose a smaller file.`;
   if (!file.size) return `The ${label} is empty. Please choose another file.`;
   return "";
 }
 function newSubmissionId() {
-  return (window.crypto && crypto.randomUUID && crypto.randomUUID()) || "sub-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10);
+  return (
+    (window.crypto && crypto.randomUUID && crypto.randomUUID()) ||
+    "sub-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10)
+  );
 }
 function upsertDocItem(item) {
   adminDocs = [item, ...adminDocs.filter((x) => x.id !== item.id)];
@@ -1433,16 +1482,31 @@ function upsertDocItem(item) {
 
 window.openDocumentForm = ({ riderId = "", replaceId = "" } = {}) => {
   const existing = replaceId ? adminDocs.find((x) => x.id === replaceId) : null;
-  if (replaceId && !existing) return toast("This document is no longer in the list. Refresh the page and try again.");
+  if (replaceId && !existing)
+    return toast(
+      "This document is no longer in the list. Refresh the page and try again.",
+    );
   const isReplace = !!existing;
-  const preset = isReplace ? null : db.riders.find((x) => x.id === riderId) || null;
-  if (!isReplace && riderId && !preset) return toast("That rider was not found in the registered riders.");
+  const preset = isReplace
+    ? null
+    : db.riders.find((x) => x.id === riderId) || null;
+  if (!isReplace && riderId && !preset)
+    return toast("That rider was not found in the registered riders.");
   const riderId0 = isReplace ? existing.riderId : preset ? preset.id : "";
-  const riderName0 = isReplace ? existing.riderName || "" : preset ? preset.name || "" : "";
+  const riderName0 = isReplace
+    ? existing.riderName || ""
+    : preset
+      ? preset.name || ""
+      : "";
   const typeOptions = [
     `<option value="" ${isReplace ? "hidden" : "selected"}>Choose a document type</option>`,
-    ...(isReplace && !DOC_UPLOAD_TYPES.includes(existing.type) ? [`<option selected>${esc(existing.type)}</option>`] : []),
-    ...DOC_UPLOAD_TYPES.map((t) => `<option ${isReplace && t === existing.type ? "selected" : ""}>${esc(t)}</option>`),
+    ...(isReplace && !DOC_UPLOAD_TYPES.includes(existing.type)
+      ? [`<option selected>${esc(existing.type)}</option>`]
+      : []),
+    ...DOC_UPLOAD_TYPES.map(
+      (t) =>
+        `<option ${isReplace && t === existing.type ? "selected" : ""}>${esc(t)}</option>`,
+    ),
   ].join("");
   const riderField = isReplace
     ? `<div class="field span2"><label for="docRiderSearch">Rider</label><input id="docRiderSearch" value="${esc(riderLabelOf(riderId0, riderName0))}" disabled></div>`
@@ -1520,10 +1584,13 @@ function wireDocumentForm(existing) {
       draw();
     });
     input.addEventListener("keydown", (e) => {
-      if (list.hidden && (e.key === "ArrowDown" || e.key === "ArrowUp")) return draw();
+      if (list.hidden && (e.key === "ArrowDown" || e.key === "ArrowUp"))
+        return draw();
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
-        hi = (hi + (e.key === "ArrowDown" ? 1 : -1) + shown.length) % Math.max(1, shown.length);
+        hi =
+          (hi + (e.key === "ArrowDown" ? 1 : -1) + shown.length) %
+          Math.max(1, shown.length);
         draw();
       } else if (e.key === "Enter" && !list.hidden && shown[hi]) {
         e.preventDefault();
@@ -1541,24 +1608,42 @@ function wireDocumentForm(existing) {
 
   $("#dFile").addEventListener("change", (e) => {
     const f = e.target.files[0];
-    const problem = docFileProblem(f, DOC_FILE_EXT, "document", "JPG, JPEG, PNG, WEBP or PDF");
+    const problem = docFileProblem(
+      f,
+      DOC_FILE_EXT,
+      "document",
+      "JPG, JPEG, PNG, WEBP or PDF",
+    );
     if (problem) {
       e.target.value = "";
-      $("#dFileName").textContent = existing ? `Current: ${existing.name}` : "No file chosen";
+      $("#dFileName").textContent = existing
+        ? `Current: ${existing.name}`
+        : "No file chosen";
       return err(problem);
     }
-    $("#dFileName").textContent = f ? f.name : existing ? `Current: ${existing.name}` : "No file chosen";
+    $("#dFileName").textContent = f
+      ? f.name
+      : existing
+        ? `Current: ${existing.name}`
+        : "No file chosen";
     err("");
   });
   $("#dSelfie").addEventListener("change", (e) => {
     const f = e.target.files[0];
-    const problem = docFileProblem(f, SELFIE_FILE_EXT, "Rider Selfie / Screenshot", "JPG, JPEG, PNG or WEBP");
+    const problem = docFileProblem(
+      f,
+      SELFIE_FILE_EXT,
+      "Rider Selfie / Screenshot",
+      "JPG, JPEG, PNG or WEBP",
+    );
     const img = $("#dSelfiePreview");
     clearSelfieUrl();
     if (problem) {
       e.target.value = "";
       img.hidden = true;
-      $("#dSelfieName").textContent = existing?.selfie ? `Current: ${existing.selfie.name}` : "No file chosen";
+      $("#dSelfieName").textContent = existing?.selfie
+        ? `Current: ${existing.selfie.name}`
+        : "No file chosen";
       return err(problem);
     }
     if (f) {
@@ -1568,7 +1653,9 @@ function wireDocumentForm(existing) {
       $("#dSelfieName").textContent = f.name;
     } else {
       img.hidden = true;
-      $("#dSelfieName").textContent = existing?.selfie ? `Current: ${existing.selfie.name}` : "No file chosen";
+      $("#dSelfieName").textContent = existing?.selfie
+        ? `Current: ${existing.selfie.name}`
+        : "No file chosen";
     }
     err("");
   });
@@ -1588,13 +1675,26 @@ function wireDocumentForm(existing) {
     const rider = existing ? null : db.riders.find((x) => x.id === riderId);
     if (!existing) {
       if (!rider) return err("Choose a rider from the list.");
-      if (!DOC_UPLOAD_TYPES.includes(type)) return err("Choose a document type.");
+      if (!DOC_UPLOAD_TYPES.includes(type))
+        return err("Choose a document type.");
       if (!docFile) return err("Choose a document file to upload.");
     } else if (!docFile && !selfieFile && type === existing.type) {
-      return err("Choose a new file, a new selfie or a new document type to save.");
+      return err(
+        "Choose a new file, a new selfie or a new document type to save.",
+      );
     }
-    const docProblem = docFileProblem(docFile, DOC_FILE_EXT, "document", "JPG, JPEG, PNG, WEBP or PDF");
-    const selfieProblem = docFileProblem(selfieFile, SELFIE_FILE_EXT, "Rider Selfie / Screenshot", "JPG, JPEG, PNG or WEBP");
+    const docProblem = docFileProblem(
+      docFile,
+      DOC_FILE_EXT,
+      "document",
+      "JPG, JPEG, PNG, WEBP or PDF",
+    );
+    const selfieProblem = docFileProblem(
+      selfieFile,
+      SELFIE_FILE_EXT,
+      "Rider Selfie / Screenshot",
+      "JPG, JPEG, PNG or WEBP",
+    );
     if (docProblem || selfieProblem) return err(docProblem || selfieProblem);
 
     const fd = new FormData();
@@ -1617,20 +1717,35 @@ function wireDocumentForm(existing) {
     btn.disabled = true;
     btn.textContent = existing ? "Saving…" : "Uploading…";
     try {
-      const res = await fetch(url, { method, credentials: "include", body: fd });
+      const res = await fetch(url, {
+        method,
+        credentials: "include",
+        body: fd,
+      });
       if (res.status === 401) return sessionEnded();
       const out = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(out.error || "Upload failed (" + res.status + ")");
+      if (!res.ok)
+        throw new Error(out.error || "Upload failed (" + res.status + ")");
       upsertDocItem(out.item);
       clearSelfieUrl();
       closeModal();
       render("documents");
-      toast(existing ? "Document updated" : out.duplicate ? "This document was already saved." : "Document uploaded");
+      toast(
+        existing
+          ? "Document updated"
+          : out.duplicate
+            ? "This document was already saved."
+            : "Document uploaded",
+      );
     } catch (ex) {
       busy = false;
       btn.disabled = false;
       btn.textContent = existing ? "Save changes" : "Upload";
-      err(ex.message === "Failed to fetch" ? "The server is not reachable. Check that it is running and try again." : ex.message);
+      err(
+        ex.message === "Failed to fetch"
+          ? "The server is not reachable. Check that it is running and try again."
+          : ex.message,
+      );
     }
   };
 }
@@ -1642,7 +1757,11 @@ window.viewDoc = async (id, kind = "document") => {
   const name = selfie ? d?.selfie?.name || "selfie" : d?.name || "document";
   try {
     const r = await fetch(
-      PARTNER_API_BASE + "/api/admin/rider-documents/" + encodeURIComponent(id) + "/file" + (selfie ? "?kind=selfie" : ""),
+      PARTNER_API_BASE +
+        "/api/admin/rider-documents/" +
+        encodeURIComponent(id) +
+        "/file" +
+        (selfie ? "?kind=selfie" : ""),
       { credentials: "include" },
     );
     if (r.status === 401) return sessionEnded();
@@ -1672,7 +1791,11 @@ window.downloadDoc = async (id, kind = "document") => {
   const selfie = kind === "selfie";
   try {
     const r = await fetch(
-      PARTNER_API_BASE + "/api/admin/rider-documents/" + encodeURIComponent(id) + "/file" + (selfie ? "?kind=selfie" : ""),
+      PARTNER_API_BASE +
+        "/api/admin/rider-documents/" +
+        encodeURIComponent(id) +
+        "/file" +
+        (selfie ? "?kind=selfie" : ""),
       { credentials: "include" },
     );
     if (r.status === 401) return sessionEnded();
@@ -1683,7 +1806,9 @@ window.downloadDoc = async (id, kind = "document") => {
     const url = URL.createObjectURL(await r.blob());
     const link = document.createElement("a");
     link.href = url;
-    link.download = selfie ? d?.selfie?.name || "selfie" : d?.name || "document";
+    link.download = selfie
+      ? d?.selfie?.name || "selfie"
+      : d?.name || "document";
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -1695,11 +1820,17 @@ window.downloadDoc = async (id, kind = "document") => {
 window.deleteDoc = async (id) => {
   const d = adminDocs.find((x) => x.id === id);
   if (d) {
-    if (!confirm(`Delete ${d.type} (${d.name}) of ${d.riderName || d.riderId}? This cannot be undone.`))
+    if (
+      !confirm(
+        `Delete ${d.type} (${d.name}) of ${d.riderName || d.riderId}? This cannot be undone.`,
+      )
+    )
       return;
     try {
       const r = await fetch(
-        PARTNER_API_BASE + "/api/admin/rider-documents/" + encodeURIComponent(id),
+        PARTNER_API_BASE +
+          "/api/admin/rider-documents/" +
+          encodeURIComponent(id),
         { method: "DELETE", credentials: "include" },
       );
       if (r.status === 401) return sessionEnded();
@@ -2787,7 +2918,13 @@ function exportPartnerRows(type) {
 function banUntilText(ban) {
   return ban && ban.until
     ? "until " +
-        new Date(ban.until).toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })
+        new Date(ban.until).toLocaleString("en-IN", {
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
     : "until unbanned";
 }
 function partnerBanButton(p) {
@@ -2803,7 +2940,8 @@ function applyServerPartner(p, out) {
 }
 window.banPartner = (id) => {
   const p = (db.partners || []).find((x) => x.id === id);
-  if (!p || !p.portalLogin) return toast("This application has no portal login yet.");
+  if (!p || !p.portalLogin)
+    return toast("This application has no portal login yet.");
   const kind = p.type === "Vendor" ? "Vendor" : "Franchise";
   const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
   openModal(`<h3>Ban ${esc(p.appId)} · ${esc(p.name)}?</h3>
@@ -2822,9 +2960,11 @@ window.banPartner = (id) => {
     let until = "";
     if (choice === "date") {
       const d = $("#banDate").value;
-      if (!d) return ($("#banError").textContent = "Choose the last day of the ban.");
+      if (!d)
+        return ($("#banError").textContent = "Choose the last day of the ban.");
       until = new Date(d + "T23:59:59").toISOString();
-    } else if (choice !== "forever") until = new Date(Date.now() + Number(choice) * 86400000).toISOString();
+    } else if (choice !== "forever")
+      until = new Date(Date.now() + Number(choice) * 86400000).toISOString();
     const btn = $("#banConfirm");
     btn.disabled = true;
     try {
@@ -2836,7 +2976,9 @@ window.banPartner = (id) => {
       if (!r.ok) throw new Error(out.error || "Could not ban the login.");
       applyServerPartner(p, out);
       closeModal();
-      toast(`${p.appId} banned ${banUntilText(p.portalLogin?.ban)} - signed out of the portal`);
+      toast(
+        `${p.appId} banned ${banUntilText(p.portalLogin?.ban)} - signed out of the portal`,
+      );
     } catch (err) {
       btn.disabled = false;
       $("#banError").textContent = err.message;
@@ -2846,13 +2988,24 @@ window.banPartner = (id) => {
 window.unbanPartner = async (id) => {
   const p = (db.partners || []).find((x) => x.id === id);
   if (!p) return;
-  if (!confirm(`Unban ${p.appId} (${p.name})? They can sign in to the portal again with their own password.`)) return;
+  if (
+    !confirm(
+      `Unban ${p.appId} (${p.name})? They can sign in to the portal again with their own password.`,
+    )
+  )
+    return;
   try {
-    const r = await partnerApi("/" + encodeURIComponent(p.id) + "/unban", { method: "POST" });
+    const r = await partnerApi("/" + encodeURIComponent(p.id) + "/unban", {
+      method: "POST",
+    });
     const out = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(out.error || "Could not unban the login.");
     applyServerPartner(p, out);
-    if (!$("#modal").classList.contains("hidden") && $("#modalBody [data-view-id]")) viewPartner(p.id);
+    if (
+      !$("#modal").classList.contains("hidden") &&
+      $("#modalBody [data-view-id]")
+    )
+      viewPartner(p.id);
     toast(`${p.appId} unbanned - they can sign in again`);
   } catch (err) {
     toast(err.message);
@@ -2872,9 +3025,17 @@ function partnerRidersButton(p) {
   if (!n && !p.portalLogin) return "";
   return `<button class="btn-sm ${n ? "primary" : ""}" onclick="showPartnerRiders('${esc(p.id)}')" title="Riders registered by this ${p.type === "Vendor" ? "vendor" : "franchise"}">🛵 Riders (${n})</button>`;
 }
-const RIDER_STATUS_CLASS = { APPROVED: "success", PENDING: "warning", REJECTED: "danger" };
+const RIDER_STATUS_CLASS = {
+  APPROVED: "success",
+  PENDING: "warning",
+  REJECTED: "danger",
+};
 const prMoney = (n) =>
-  "₹" + Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  "₹" +
+  Number(n || 0).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 function partnerRidersGroupHtml(g) {
   const p = g.partner,
     c = g.counts;
@@ -2921,7 +3082,10 @@ window.showPartnerRiders = (id) => {
 window.exportPartnerRiders = (id) => {
   const p = (db.partners || []).find((x) => x.id === id);
   if (!p) return;
-  if (!window.XLSX) return toast("The Excel library did not load. Reload the page and try again.");
+  if (!window.XLSX)
+    return toast(
+      "The Excel library did not load. Reload the page and try again.",
+    );
   const g = partnerRiderGroups([p])[0];
   const rows = g.riders.map((r, i) => ({
     "S.No": i + 1,
@@ -2932,7 +3096,9 @@ window.exportPartnerRiders = (id) => {
     "Hub Location": r.hubLocation || "",
     Status: r.status,
     "Application ID": r.applicationId || "",
-    Registered: r.createdAt ? new Date(r.createdAt).toLocaleDateString("en-IN") : "",
+    Registered: r.createdAt
+      ? new Date(r.createdAt).toLocaleDateString("en-IN")
+      : "",
     "Payment Weeks": r.payments ? r.payments.weeks : 0,
     "Total Orders": r.payments ? r.payments.orders : 0,
     "Total Amount": r.payments ? Math.round(r.payments.amount * 100) / 100 : 0,
@@ -2942,8 +3108,13 @@ window.exportPartnerRiders = (id) => {
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Riders");
-  XLSX.writeFile(wb, `${p.appId}-riders-${new Date().toISOString().slice(0, 10)}.xlsx`);
-  toast(`Exported ${rows.length} rider${rows.length === 1 ? "" : "s"} of ${p.appId}`);
+  XLSX.writeFile(
+    wb,
+    `${p.appId}-riders-${new Date().toISOString().slice(0, 10)}.xlsx`,
+  );
+  toast(
+    `Exported ${rows.length} rider${rows.length === 1 ? "" : "s"} of ${p.appId}`,
+  );
 };
 function vendorRows(
   list = (Array.isArray(db.partners) ? db.partners : []).filter(
@@ -3102,7 +3273,8 @@ function bindClient() {
     (!weeklyStore.loadedAt || Date.now() - weeklyStore.loadedAt > 10000)
   )
     loadWeeklyPayments().then(() => {
-      if (currentPage === "client" && window.__clientApply) window.__clientApply();
+      if (currentPage === "client" && window.__clientApply)
+        window.__clientApply();
     });
   if (sf) sf.onchange = apply;
   window.__clientApply = apply;
@@ -3246,7 +3418,9 @@ window.decidePartner = (id, decision) => {
     const hadLogin = !!p.portalLogin;
     try {
       if (p.serverSynced) {
-        const notify = $("#decisionNotify") ? $("#decisionNotify").checked : true;
+        const notify = $("#decisionNotify")
+          ? $("#decisionNotify").checked
+          : true;
         const r = await partnerApi(
           "/" + encodeURIComponent(p.id) + "/decision",
           { method: "POST", body: JSON.stringify({ decision, note, notify }) },
@@ -3293,7 +3467,8 @@ window.decidePartner = (id, decision) => {
           ? `${p.appId} moved back to Under Review${hadLogin ? " - portal login switched off" : ""}`
           : accept
             ? `${p.appId} accepted${reenabled ? " - their portal login works again" : ""}`
-            : `${p.appId} rejected${hadLogin ? " - portal login switched off" : ""}`) + mailNote,
+            : `${p.appId} rejected${hadLogin ? " - portal login switched off" : ""}`) +
+          mailNote,
       );
     } catch (err) {
       console.warn("Could not save decision:", err);
@@ -3833,7 +4008,9 @@ function paintAdminAccounts() {
       : (adminAcct.mailProblem ||
           "Reset emails cannot be sent from this server right now.") +
         " Meanwhile, use Temporary password; Forgot password requests appear here.";
-  updateSettingsNavCount(adminAcct.admins.filter((x) => x.helpRequestedAt).length);
+  updateSettingsNavCount(
+    adminAcct.admins.filter((x) => x.helpRequestedAt).length,
+  );
 }
 function updateSettingsNavCount(n) {
   const btn = document.querySelector('.nav[data-page="settings"]');
@@ -3859,7 +4036,9 @@ async function checkPasswordHelpRequests() {
     const asking = adminAcct.admins.filter((x) => x.helpRequestedAt);
     updateSettingsNavCount(asking.length);
     const keys = asking.map((x) => x.loginId + "@" + x.helpRequestedAt);
-    const fresh = knownHelpRequests ? keys.filter((k) => !knownHelpRequests.includes(k)) : keys;
+    const fresh = knownHelpRequests
+      ? keys.filter((k) => !knownHelpRequests.includes(k))
+      : keys;
     if (fresh.length)
       toast(
         `${asking.length === 1 ? asking[0].name || asking[0].email : asking.length + " admins"} asked for password help - see Settings > Admin Accounts`,
@@ -3918,7 +4097,8 @@ function adminDetailsModal(x) {
     const v = emailEl.value.trim();
     hint.textContent =
       v && /@/.test(v) && !/@gmail\.com$/i.test(v)
-        ? baseHint + " Note: this is not a Gmail address; check it is the admin's correct email."
+        ? baseHint +
+          " Note: this is not a Gmail address; check it is the admin's correct email."
         : baseHint;
   };
   emailEl.oninput();
@@ -3939,16 +4119,25 @@ function adminDetailsModal(x) {
     btn.disabled = true;
     try {
       if (isNew) {
-        const out = await adminAcctRequest("", { method: "POST", body: { name, email } });
-        adminAcct.admins = out.admins || adminAcct.admins;
-        paintAdminAccounts();
-        adminAcctSay(`${out.name} (${out.email}) was added as an admin.`, "success");
-        showTemporaryPassword(out, { isNew: true });
-      } else {
-        const out = await adminAcctRequest("/" + encodeURIComponent(x.loginId), {
-          method: "PATCH",
+        const out = await adminAcctRequest("", {
+          method: "POST",
           body: { name, email },
         });
+        adminAcct.admins = out.admins || adminAcct.admins;
+        paintAdminAccounts();
+        adminAcctSay(
+          `${out.name} (${out.email}) was added as an admin.`,
+          "success",
+        );
+        showTemporaryPassword(out, { isNew: true });
+      } else {
+        const out = await adminAcctRequest(
+          "/" + encodeURIComponent(x.loginId),
+          {
+            method: "PATCH",
+            body: { name, email },
+          },
+        );
         adminAcct.admins = out.admins || adminAcct.admins;
         if (x.loginId === currentUser.loginId && out.account) {
           currentUser.name = out.account.name;
@@ -4073,7 +4262,11 @@ function bindSettings() {
     toast("Password changed");
   };
   $("#clearData").onclick = () => {
-    if (confirm("Clear the data kept only in this browser (Daily Work, WhatsApp messages, manual payment adjustments)? Server data is not changed.")) {
+    if (
+      confirm(
+        "Clear the data kept only in this browser (Daily Work, WhatsApp messages, manual payment adjustments)? Server data is not changed.",
+      )
+    ) {
       db = structuredClone(seed);
       save();
       rrLoad({ quiet: true });
@@ -4210,7 +4403,10 @@ async function loadWeeklyPayments() {
     weeklyStore.rows.length +
     "|" +
     weeklyStore.rows
-      .map((r) => `${r.id}:${r.paymentStatus}:${r.amount}:${r.totalOrders}:${r.importedAt}`)
+      .map(
+        (r) =>
+          `${r.id}:${r.paymentStatus}:${r.amount}:${r.totalOrders}:${r.importedAt}`,
+      )
       .join(",");
   const changed = weeklyStore.signature !== before;
   weeklyStore.pendingData = null;
@@ -4541,15 +4737,36 @@ function bindPayments() {
     e.target.value = "";
   });
 }
-window.downloadPartnerDocument = async (applicationId, documentId, fileName) => {
+window.downloadPartnerDocument = async (
+  applicationId,
+  documentId,
+  fileName,
+) => {
   try {
-    const response = await fetch(PARTNER_API_BASE + `/api/partner-applications/${encodeURIComponent(applicationId)}/documents/${encodeURIComponent(documentId)}`, { credentials: "include" });
-    if (!response.ok) { let message = "Document download failed."; try { message = (await response.json()).error || message; } catch {} throw new Error(message); }
+    const response = await fetch(
+      PARTNER_API_BASE +
+        `/api/partner-applications/${encodeURIComponent(applicationId)}/documents/${encodeURIComponent(documentId)}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let message = "Document download failed.";
+      try {
+        message = (await response.json()).error || message;
+      } catch {}
+      throw new Error(message);
+    }
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = fileName || "applicant-document";
-    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-  } catch (error) { alert(error.message || "Could not download document."); }
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName || "applicant-document";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    alert(error.message || "Could not download document.");
+  }
 };
 
 window.viewPartner = (id) => {
@@ -4667,21 +4884,22 @@ window.viewPartner = (id) => {
         : "";
   const banLog = Array.isArray(p.banLog) ? p.banLog : [];
   const ban = p.portalLogin?.ban;
-  const banBox = !p.serverSynced || (!p.portalLogin && !banLog.length)
-    ? ""
-    : `<div class="ban-box ${ban ? "banned" : ""}"><div>${ban ? `<b>🚫 Login banned ${esc(banUntilText(ban))}</b>${ban.by ? ` · by ${esc(ban.by)}` : ""}${ban.since ? ` on ${esc(fmtDate(ban.since))}` : ""}${ban.reason ? `<div>Reason: ${esc(ban.reason)}</div>` : ""}` : "<b>Portal login not banned</b>"}${
-        banLog.length
-          ? `<ul>${banLog
-              .slice()
-              .reverse()
-              .slice(0, 10)
-              .map(
-                (b) =>
-                  `<li>${b.action === "banned" ? "🚫 Banned" : "✓ Unbanned"} · ${esc(fmtDate(b.at))} · ${esc(b.by || "")}${b.action === "banned" ? ` · ${esc(b.until ? "until " + fmtDate(b.until) : "until unbanned")}${b.reason ? " · " + esc(b.reason) : ""}` : ""}</li>`,
-              )
-              .join("")}</ul>`
-          : ""
-      }</div>${p.portalLogin ? (ban ? `<button type="button" class="btn-sm accept" onclick="unbanPartner('${pid}')">✓ Unban</button>` : `<button type="button" class="btn-sm danger" onclick="banPartner('${pid}')">🚫 Ban login</button>`) : ""}</div>`;
+  const banBox =
+    !p.serverSynced || (!p.portalLogin && !banLog.length)
+      ? ""
+      : `<div class="ban-box ${ban ? "banned" : ""}"><div>${ban ? `<b>🚫 Login banned ${esc(banUntilText(ban))}</b>${ban.by ? ` · by ${esc(ban.by)}` : ""}${ban.since ? ` on ${esc(fmtDate(ban.since))}` : ""}${ban.reason ? `<div>Reason: ${esc(ban.reason)}</div>` : ""}` : "<b>Portal login not banned</b>"}${
+          banLog.length
+            ? `<ul>${banLog
+                .slice()
+                .reverse()
+                .slice(0, 10)
+                .map(
+                  (b) =>
+                    `<li>${b.action === "banned" ? "🚫 Banned" : "✓ Unbanned"} · ${esc(fmtDate(b.at))} · ${esc(b.by || "")}${b.action === "banned" ? ` · ${esc(b.until ? "until " + fmtDate(b.until) : "until unbanned")}${b.reason ? " · " + esc(b.reason) : ""}` : ""}</li>`,
+                )
+                .join("")}</ul>`
+            : ""
+        }</div>${p.portalLogin ? (ban ? `<button type="button" class="btn-sm accept" onclick="unbanPartner('${pid}')">✓ Unban</button>` : `<button type="button" class="btn-sm danger" onclick="banPartner('${pid}')">🚫 Ban login</button>`) : ""}</div>`;
   const EMAIL_KIND = {
     submitted: "Application submitted",
     approved: "Application approved",
@@ -4690,9 +4908,10 @@ window.viewPartner = (id) => {
     new_password: "New temporary password",
   };
   const emailLog = Array.isArray(p.emailLog) ? p.emailLog : [];
-  const documentBox = Array.isArray(p.documents) && p.documents.length
-    ? `<div class="email-log"><b>Applicant Documents</b><ul>${p.documents.map((d) => `<li>${esc(d.type)} · ${esc(d.name)} · ${(Number(d.size || 0) / 1024).toFixed(1)} KB <button type="button" class="btn-sm" onclick="downloadPartnerDocument('${pid}','${esc(d.id)}','${esc(d.name)}')">⬇ Download</button></li>`).join("")}</ul></div>`
-    : `<div class="email-log"><b>Applicant Documents</b><span class="muted">No documents uploaded.</span></div>`;
+  const documentBox =
+    Array.isArray(p.documents) && p.documents.length
+      ? `<div class="email-log"><b>Applicant Documents</b><ul>${p.documents.map((d) => `<li>${esc(d.type)} · ${esc(d.name)} · ${(Number(d.size || 0) / 1024).toFixed(1)} KB <button type="button" class="btn-sm" onclick="downloadPartnerDocument('${pid}','${esc(d.id)}','${esc(d.name)}')">⬇ Download</button></li>`).join("")}</ul></div>`
+      : `<div class="email-log"><b>Applicant Documents</b><span class="muted">No documents uploaded.</span></div>`;
   const emailBox = p.serverSynced
     ? `<div class="email-log"><b>Emails to the applicant</b>${
         emailLog.length
@@ -4878,7 +5097,10 @@ async function rrCall(url, { method = "GET", body } = {}) {
 function syncRegisteredRiders() {
   if (!Array.isArray(db.hiddenRegistrations)) db.hiddenRegistrations = [];
   let changed = false;
-  const lower = (v) => String(v ?? "").trim().toLowerCase();
+  const lower = (v) =>
+    String(v ?? "")
+      .trim()
+      .toLowerCase();
   for (const reg of rrItems || []) {
     const rid = String(reg.riderId || "").trim();
     if (!rid || db.hiddenRegistrations.includes(reg.id)) continue;
@@ -4886,7 +5108,12 @@ function syncRegisteredRiders() {
       db.riders.find((x) => x.registrationId === reg.id) ||
       db.riders.find((x) => lower(x.id) === lower(rid));
     if (reg.status !== "APPROVED") {
-      if (r && r.registrationId === reg.id && reg.status === "REJECTED" && r.status !== "Inactive") {
+      if (
+        r &&
+        r.registrationId === reg.id &&
+        reg.status === "REJECTED" &&
+        r.status !== "Inactive"
+      ) {
         r.status = "Inactive";
         changed = true;
       }
@@ -4894,7 +5121,9 @@ function syncRegisteredRiders() {
     }
     if (!r) {
       const key = normRiderMasterName(reg.riderName);
-      const prov = db.riders.filter((x) => x.provisional && normRiderMasterName(x.name) === key);
+      const prov = db.riders.filter(
+        (x) => x.provisional && normRiderMasterName(x.name) === key,
+      );
       if (prov.length === 1) r = prov[0];
     }
     const next = {
@@ -4916,7 +5145,12 @@ function syncRegisteredRiders() {
       continue;
     }
     const oldId = String(r.id);
-    if (r.registrationId !== reg.id || r.provisional || r.status === "Pending Verification" || r.status === "Inactive") {
+    if (
+      r.registrationId !== reg.id ||
+      r.provisional ||
+      r.status === "Pending Verification" ||
+      r.status === "Inactive"
+    ) {
       next.status = "Active";
     }
     for (const [k, v] of Object.entries(next))
@@ -4934,7 +5168,10 @@ function syncRegisteredRiders() {
   }
   if (changed) {
     save();
-    if (["dashboard", "riders", "documents"].includes(currentPage) && !document.querySelector("#modal:not(.hidden)"))
+    if (
+      ["dashboard", "riders", "documents"].includes(currentPage) &&
+      !document.querySelector("#modal:not(.hidden)")
+    )
       render(currentPage);
   }
   return changed;
@@ -4945,7 +5182,9 @@ function rrPendingCount() {
 let rrKnownPending = null;
 function announceNewPartnerRiders() {
   const pending = (rrItems || []).filter((r) => r.status === "PENDING");
-  const fresh = rrKnownPending ? pending.filter((r) => !rrKnownPending.has(r.id) && r.ownerLoginId) : [];
+  const fresh = rrKnownPending
+    ? pending.filter((r) => !rrKnownPending.has(r.id) && r.ownerLoginId)
+    : [];
   rrKnownPending = new Set(pending.map((r) => r.id));
   if (!fresh.length) return;
   const r = fresh[0];
@@ -4963,10 +5202,15 @@ async function rrLoad({ quiet = false } = {}) {
     rrItems = out.items || [];
     announceNewPartnerRiders();
     rrRender();
-    if (currentPage === "dashboard" && before !== rrPendingCount() && !document.querySelector("#modal:not(.hidden)"))
+    if (
+      currentPage === "dashboard" &&
+      before !== rrPendingCount() &&
+      !document.querySelector("#modal:not(.hidden)")
+    )
       render("dashboard");
     syncRegisteredRiders();
-    if (currentPage === "client" && window.__clientApply) window.__clientApply();
+    if (currentPage === "client" && window.__clientApply)
+      window.__clientApply();
   } catch (e) {
     if (!quiet)
       toast(
