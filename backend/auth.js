@@ -48,9 +48,13 @@ export function createAuth(db) {
   }
   // Partner bans (Admin > Client > Ban): columns added to older databases; nobody is banned by the upgrade.
   {
-    const cols = db.prepare("PRAGMA table_info(accounts)").all().map((c) => c.name);
+    const cols = db
+      .prepare("PRAGMA table_info(accounts)")
+      .all()
+      .map((c) => c.name);
     for (const col of ["banned_at", "banned_until", "ban_reason", "banned_by"])
-      if (!cols.includes(col)) db.exec(`ALTER TABLE accounts ADD COLUMN ${col} TEXT`);
+      if (!cols.includes(col))
+        db.exec(`ALTER TABLE accounts ADD COLUMN ${col} TEXT`);
   }
 
   const now = () => new Date().toISOString();
@@ -119,7 +123,8 @@ export function createAuth(db) {
   // The current ban of a vendor / franchise login, or null. A ban with an end time stops by itself at that time;
   // without one it lasts until an admin unbans the partner.
   function banInfo(a) {
-    if (!a || !a.banned_at || (a.role !== "vendor" && a.role !== "franchise")) return null;
+    if (!a || !a.banned_at || (a.role !== "vendor" && a.role !== "franchise"))
+      return null;
     if (a.banned_until && a.banned_until <= now()) return null;
     return {
       since: a.banned_at,
@@ -226,9 +231,26 @@ export function createAuth(db) {
     }
     return out;
   }
+  function isHttpsRequest(req) {
+    if (req.secure || process.env.COOKIE_SECURE === "true") return true;
+    const forwardedProto = String(req.headers["x-forwarded-proto"] || "")
+      .split(",")[0]
+      .trim()
+      .toLowerCase();
+    return forwardedProto === "https";
+  }
   function cookieHeader(req, name, value, maxAgeMs) {
-    const secure = req.secure || process.env.COOKIE_SECURE === "true";
-    let c = `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax`;
+    const secure = isHttpsRequest(req);
+    const configuredSameSite = String(process.env.COOKIE_SAME_SITE || "")
+      .trim()
+      .toLowerCase();
+    let sameSite = "Lax";
+    if (configuredSameSite === "none" && secure) sameSite = "None";
+    else if (configuredSameSite === "strict") sameSite = "Strict";
+    else if (configuredSameSite === "lax") sameSite = "Lax";
+    else if (secure) sameSite = "None";
+
+    let c = `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=${sameSite}`;
     if (secure) c += "; Secure";
     if (maxAgeMs === 0) c += "; Max-Age=0";
     else if (maxAgeMs) c += `; Max-Age=${Math.floor(maxAgeMs / 1000)}`;
@@ -307,12 +329,10 @@ export function createAuth(db) {
         const s = getSession(req, role);
         if (!s) continue;
         if (s.account.must_change_password)
-          return res
-            .status(403)
-            .json({
-              error: "Please set a new password first.",
-              code: "PASSWORD_CHANGE_REQUIRED",
-            });
+          return res.status(403).json({
+            error: "Please set a new password first.",
+            code: "PASSWORD_CHANGE_REQUIRED",
+          });
         req.account = s.account;
         req.session = s;
         if (role === "admin")
@@ -500,16 +520,24 @@ export function createAuth(db) {
 
   // ---------- Super Admin: admin names and registered emails ----------
   // An admin's registered email is also their sign-in ID (login_id), so it must be unique across all accounts.
-  const ADMIN_EMAIL_RE = /^[^\s@<>()\\",;:]+@[^\s@<>()\\",;:]+\.[^\s@<>()\\",;:]+$/;
+  const ADMIN_EMAIL_RE =
+    /^[^\s@<>()\\",;:]+@[^\s@<>()\\",;:]+\.[^\s@<>()\\",;:]+$/;
   function checkAdminName(name) {
-    const n = String(name ?? "").replace(/\s+/g, " ").trim();
+    const n = String(name ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
     if (!n) return { error: "Enter the admin's full name.", field: "name" };
     if (n.length > 100)
-      return { error: "The name is too long (100 characters at most).", field: "name" };
+      return {
+        error: "The name is too long (100 characters at most).",
+        field: "name",
+      };
     return { value: n };
   }
   function checkAdminEmail(email, exceptId = null) {
-    const e = String(email ?? "").trim().toLowerCase();
+    const e = String(email ?? "")
+      .trim()
+      .toLowerCase();
     if (!e || e.length > 254 || !ADMIN_EMAIL_RE.test(e))
       return { error: "Enter a valid email address.", field: "email" };
     const clash =
@@ -532,8 +560,17 @@ export function createAuth(db) {
   function updateAdminDetails(loginId, { name, email } = {}) {
     const a = adminByLoginId(loginId);
     if (!a)
-      return { ok: false, status: 404, error: "That admin account was not found." };
-    const fail = (c) => ({ ok: false, status: c.status || 400, error: c.error, field: c.field });
+      return {
+        ok: false,
+        status: 404,
+        error: "That admin account was not found.",
+      };
+    const fail = (c) => ({
+      ok: false,
+      status: c.status || 400,
+      error: c.error,
+      field: c.field,
+    });
     const previousEmail = (a.email || a.login_id || "").trim().toLowerCase();
     let newName = a.name || "",
       newEmail = previousEmail;
@@ -569,10 +606,16 @@ export function createAuth(db) {
   // Adds an admin with a temporary password (returned once). They must choose their own password at first sign-in.
   async function addAdmin({ name, email } = {}) {
     const n = checkAdminName(name);
-    if (n.error) return { ok: false, status: 400, error: n.error, field: n.field };
+    if (n.error)
+      return { ok: false, status: 400, error: n.error, field: n.field };
     const e = checkAdminEmail(email);
     if (e.error)
-      return { ok: false, status: e.status || 400, error: e.error, field: e.field };
+      return {
+        ok: false,
+        status: e.status || 400,
+        error: e.error,
+        field: e.field,
+      };
     const password = tempPassword();
     const account = await createAccount({
       role: "admin",
@@ -647,26 +690,39 @@ export function createAuth(db) {
   }
   // Bans the portal login of an application's partner: they are signed out now and cannot sign in until the ban ends
   // (until = ISO time) or an admin unbans them (until = ""). The application status is not changed.
-  function banPartner(applicationId, { until = "", reason = "", actor = "" } = {}) {
+  function banPartner(
+    applicationId,
+    { until = "", reason = "", actor = "" } = {},
+  ) {
     const account = q.byApplication.get(applicationId);
     if (!account || (account.role !== "vendor" && account.role !== "franchise"))
       return {
         ok: false,
         status: 400,
-        error: "This application has no portal login yet, so there is nothing to ban.",
+        error:
+          "This application has no portal login yet, so there is nothing to ban.",
       };
     let untilIso = null;
     if (String(until || "").trim()) {
       const t = Date.parse(until);
       if (!Number.isFinite(t))
-        return { ok: false, status: 400, error: "The end of the ban is not a valid date." };
+        return {
+          ok: false,
+          status: 400,
+          error: "The end of the ban is not a valid date.",
+        };
       if (t <= Date.now() + 60_000)
-        return { ok: false, status: 400, error: "The ban must end in the future." };
+        return {
+          ok: false,
+          status: 400,
+          error: "The ban must end in the future.",
+        };
       if (t > Date.now() + 5 * 366 * 86400000)
         return {
           ok: false,
           status: 400,
-          error: "A ban can last at most 5 years. Choose \"Until I unban\" instead.",
+          error:
+            'A ban can last at most 5 years. Choose "Until I unban" instead.',
         };
       untilIso = new Date(t).toISOString();
     }
@@ -676,7 +732,10 @@ export function createAuth(db) {
     ).run(
       t,
       untilIso,
-      String(reason || "").replace(/\s+/g, " ").trim().slice(0, 300),
+      String(reason || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 300),
       String(actor || "").slice(0, 254),
       t,
       account.id,
@@ -688,7 +747,11 @@ export function createAuth(db) {
   function unbanPartner(applicationId) {
     const account = q.byApplication.get(applicationId);
     if (!account)
-      return { ok: false, status: 400, error: "This application has no portal login." };
+      return {
+        ok: false,
+        status: 400,
+        error: "This application has no portal login.",
+      };
     db.prepare(
       "UPDATE accounts SET banned_at=NULL,banned_until=NULL,ban_reason=NULL,banned_by=NULL,updated_at=? WHERE id=?",
     ).run(now(), account.id);
