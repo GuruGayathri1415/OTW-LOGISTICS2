@@ -14,8 +14,6 @@
 //
 // No credentials are written to logs or responses. Settings come from backend/.env (GMAIL_OAUTH_*).
 import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
 import { sameAddress, TICKET_NO_PATTERN } from "./support-tickets.js";
 import {
   CONFIRM_SUBJECT,
@@ -190,8 +188,17 @@ export function createGmailApi({ config, fetchImpl = fetch, log = console }) {
   return { configured, call, sendMail };
 }
 
-export function createGmailInbound({ db, api, service, mailer, adminRecipients, supportEmail, baseUrl = "", log = console }) {
-  db.exec(`
+export async function createGmailInbound({
+  db,
+  api,
+  service,
+  mailer,
+  adminRecipients,
+  supportEmail,
+  baseUrl = "",
+  log = console,
+}) {
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS support_inbound_messages(
       gmail_id TEXT PRIMARY KEY,
       thread_id TEXT NOT NULL DEFAULT '',
@@ -206,35 +213,45 @@ export function createGmailInbound({ db, api, service, mailer, adminRecipients, 
 
   const state = { lastPollAt: "", lastError: "", lastCount: 0, polling: false, mailbox: "" };
   const enabled = () => api.configured();
-  const seen = (gmailId) => db.prepare("SELECT 1 FROM support_inbound_messages WHERE gmail_id=?").get(gmailId);
+  const seen = (gmailId) =>
+    db.prepare("SELECT 1 FROM support_inbound_messages WHERE gmail_id=?").get(gmailId);
   const record = (msg, ticketNo, action, at) =>
     db
-      .prepare("INSERT OR IGNORE INTO support_inbound_messages VALUES(?,?,?,?,?,?,?,?)")
+      .prepare(
+        `INSERT INTO support_inbound_messages(gmail_id,thread_id,from_addr,subject,ticket_id,action,received_at,processed_at)
+         VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(gmail_id) DO NOTHING`,
+      )
       .run(msg.gmailId, msg.threadId, msg.from.email, msg.subject, ticketNo, action, at, at);
 
-  function queueAdminNotice(ticket, reason, gmailId) {
-    mailer.enqueue({
+  const resolveAdmins = async () =>
+    typeof adminRecipients === "function" ? await adminRecipients() : adminRecipients || [];
+
+  async function queueAdminNotice(ticket, reason, gmailId) {
+    const admins = await resolveAdmins();
+    await mailer.enqueue({
       ticketId: ticket.id,
       dedupeKey: `notice:${gmailId}`,
       kind: "admin_notice",
-      to: adminRecipients().join(", "),
+      to: admins.join(", "),
       subject: NOTICE_SUBJECT(ticket.ticket_no),
       body: noticeBody(ticket, { baseUrl, reason }),
     });
   }
 
   // Decides what one message becomes.
-  function handle(msg) {
+  async function handle(msg) {
     const at = new Date().toISOString();
     const own = msg.from.email === state.mailbox || msg.from.email === supportEmail.toLowerCase();
     if (own || msg.autoSubmitted) {
-      record(msg, "", own ? "ignored-own" : "ignored-automatic", at);
+      await record(msg, "", own ? "ignored-own" : "ignored-automatic", at);
       return { action: own ? "ignored-own" : "ignored-automatic", ticketNo: "" };
     }
 
     const mentioned = (`${msg.subject}\n${msg.text}`.match(TICKET_NO_PATTERN) || [])[0] || "";
-    let ticket = mentioned ? service.rowByNumber(mentioned) : null;
-    if (!ticket) ticket = service.ticketForMessageRefs([msg.inReplyTo, ...msg.references.split(/\s+/)]);
+    let ticket = mentioned ? await service.rowByNumber(mentioned) : null;
+    if (!ticket) {
+      ticket = await service.ticketForMessageRefs([msg.inReplyTo, ...msg.references.split(/\s+/)]);
+    }
     let note = "";
     // Only the customer who opened a ticket may add to it. Anyone else gets a new ticket of their own.
     if (ticket && !sameAddress(ticket.email, msg.from.email)) {
@@ -243,19 +260,19 @@ export function createGmailInbound({ db, api, service, mailer, adminRecipients, 
     }
 
     if (ticket) {
-      const r = service.addMessage(ticket, {
+      const r = await service.addMessage(ticket, {
         kind: "customer_email",
         authorRole: "customer",
         author: msg.from.email,
         body: msg.text,
         messageId: msg.messageId,
       });
-      queueAdminNotice(r.ticket, `A customer replied by email to ${r.ticket.ticket_no}.`, msg.gmailId);
-      record(msg, r.ticket.ticket_no, "attached", at);
+      await queueAdminNotice(r.ticket, `A customer replied by email to ${r.ticket.ticket_no}.`, msg.gmailId);
+      await record(msg, r.ticket.ticket_no, "attached", at);
       return { action: "attached", ticketNo: r.ticket.ticket_no };
     }
 
-    const created = service.create({
+    const created = await service.create({
       portalType: "Email",
       signedIn: false,
       account: null,
@@ -267,27 +284,29 @@ export function createGmailInbound({ db, api, service, mailer, adminRecipients, 
       submissionKey: `gmail:${msg.gmailId}`,
       subject: msg.subject,
     });
-    if (!created.duplicate) queueTicketEmails(created.ticket);
-    record(msg, created.ticket.ticket_no, created.duplicate ? "already-created" : "created", at);
+    if (!created.duplicate) await queueTicketEmails(created.ticket);
+    await record(msg, created.ticket.ticket_no, created.duplicate ? "already-created" : "created", at);
     return { action: created.duplicate ? "already-created" : "created", ticketNo: created.ticket.ticket_no };
   }
 
   // The support copy and the customer's confirmation for a new ticket. Queued only; the outbox sends them.
-  function queueTicketEmails(t) {
-    const submitted = service.events(t.id).find((e) => e.kind === "submitted");
-    mailer.enqueue({
+  async function queueTicketEmails(t) {
+    const evs = await service.events(t.id);
+    const submitted = evs.find((e) => e.kind === "submitted");
+    const admins = await resolveAdmins();
+    await mailer.enqueue({
       ticketId: t.id,
       dedupeKey: "new",
       kind: "new_ticket",
       to: supportEmail,
-      cc: adminRecipients(),
+      cc: admins,
       subject: NEW_TICKET_SUBJECT(t.ticket_no),
       body: newTicketBody(t, { baseUrl }),
       attachment: t.photo_path ? { path: t.photo_path, name: t.photo_name || "problem-photo" } : null,
       sourceEventId: submitted ? submitted.id : null,
     });
     if (t.email && !sameAddress(t.email, supportEmail)) {
-      mailer.enqueue({
+      await mailer.enqueue({
         ticketId: t.id,
         dedupeKey: "confirm",
         kind: "customer_confirmation",
@@ -309,12 +328,12 @@ export function createGmailInbound({ db, api, service, mailer, adminRecipients, 
       if (!state.mailbox) state.mailbox = String((await api.call("/profile")).emailAddress || "").toLowerCase();
       const list = await api.call("/messages?q=" + encodeURIComponent("is:unread in:inbox") + "&maxResults=25");
       for (const m of list.messages || []) {
-        if (seen(m.id)) {
+        if (await seen(m.id)) {
           await api.call(`/messages/${m.id}/modify`, { method: "POST", body: { removeLabelIds: ["UNREAD"] } }).catch(() => {});
           continue;
         }
         const msg = parseGmailMessage(await api.call(`/messages/${m.id}?format=full`));
-        const result = handle(msg);
+        const result = await handle(msg);
         handled++;
         log.log?.(`[support-inbound] from ${msg.from.email} -> ${result.action} ${result.ticketNo}`.trim());
         // Mark read only after the save above, so nothing is lost if this step fails.
@@ -347,9 +366,11 @@ export function createGmailInbound({ db, api, service, mailer, adminRecipients, 
 
   function start(intervalMs = 60_000) {
     if (!enabled()) return null;
-    const timer = setInterval(() => pollOnce(), intervalMs);
+    const timer = setInterval(() => {
+      pollOnce().catch((e) => log.error?.(`[support-inbound] ${e.message}`));
+    }, intervalMs);
     timer.unref?.();
-    pollOnce();
+    pollOnce().catch((e) => log.error?.(`[support-inbound] ${e.message}`));
     return timer;
   }
 

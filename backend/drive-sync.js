@@ -36,16 +36,16 @@ const FOLDER_MIME = "application/vnd.google-apps.folder";
 const STATE_TTL_MS = 10 * 60 * 1000;
 const FOLDER_ID = /^[A-Za-z0-9_-]{10,100}$/;
 
-export function createDriveSyncService({
+export async function createDriveSyncService({
   db,
   weeklyPayments,
-  audit = () => {},
+  audit = async () => {},
   parseWorkbook,
   fetchImpl = globalThis.fetch,
   now = () => new Date().toISOString(),
   env = process.env,
 }) {
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS drive_settings(
       id INTEGER PRIMARY KEY CHECK(id = 1),
       refresh_token_enc TEXT NOT NULL DEFAULT '',
@@ -72,7 +72,7 @@ export function createDriveSyncService({
     CREATE TABLE IF NOT EXISTS drive_oauth_states(
       state TEXT PRIMARY KEY, admin_email TEXT NOT NULL, created_at TEXT NOT NULL
     );
-    INSERT OR IGNORE INTO drive_settings(id) VALUES(1);`);
+    INSERT INTO drive_settings(id) VALUES(1) ON CONFLICT(id) DO NOTHING;`);
 
   const settings = () =>
     db.prepare("SELECT * FROM drive_settings WHERE id = 1").get();
@@ -135,16 +135,18 @@ export function createDriveSyncService({
   }
 
   // The link the admin's browser is sent to. The state is random, one-time and tied to the admin who asked for it.
-  function connectUrl({ adminEmail, baseUrl }) {
+  async function connectUrl({ adminEmail, baseUrl }) {
     const c = config();
     const state = crypto.randomBytes(24).toString("base64url");
     const t = now();
-    db.prepare("DELETE FROM drive_oauth_states WHERE created_at < ?").run(
-      new Date(Date.parse(t) - STATE_TTL_MS).toISOString(),
-    );
-    db.prepare(
-      "INSERT INTO drive_oauth_states(state, admin_email, created_at) VALUES(?,?,?)",
-    ).run(state, adminEmail, t);
+    await db
+      .prepare("DELETE FROM drive_oauth_states WHERE created_at < ?")
+      .run(new Date(Date.parse(t) - STATE_TTL_MS).toISOString());
+    await db
+      .prepare(
+        "INSERT INTO drive_oauth_states(state, admin_email, created_at) VALUES(?,?,?)",
+      )
+      .run(state, adminEmail, t);
     const q = new URLSearchParams({
       client_id: c.id,
       redirect_uri: redirectUri(baseUrl),
@@ -161,10 +163,14 @@ export function createDriveSyncService({
     const c = config();
     const st = String(state || "");
     const row = st
-      ? db.prepare("SELECT * FROM drive_oauth_states WHERE state = ?").get(st)
+      ? await db
+          .prepare("SELECT * FROM drive_oauth_states WHERE state = ?")
+          .get(st)
       : null;
     if (st)
-      db.prepare("DELETE FROM drive_oauth_states WHERE state = ?").run(st); // one use only
+      await db
+        .prepare("DELETE FROM drive_oauth_states WHERE state = ?")
+        .run(st); // one use only
     const fresh =
       row && Date.parse(now()) - Date.parse(row.created_at) <= STATE_TTL_MS;
     if (!row || !fresh || row.admin_email !== adminEmail) {
@@ -192,21 +198,23 @@ export function createDriveSyncService({
       );
     }
     const email = await accountEmail(tok.access_token).catch(() => "");
-    db.prepare(
-      "UPDATE drive_settings SET refresh_token_enc = ?, connected_email = ?, connected_by = ?, connected_at = ? WHERE id = 1",
-    ).run(seal(tok.refresh_token), email, adminEmail, now());
+    await db
+      .prepare(
+        "UPDATE drive_settings SET refresh_token_enc = ?, connected_email = ?, connected_by = ?, connected_at = ? WHERE id = 1",
+      )
+      .run(seal(tok.refresh_token), email, adminEmail, now());
     cache = {
       token: tok.access_token,
       exp: Date.now() + (tok.expires_in || 3600) * 1000,
     };
-    audit(adminEmail, "drive_connected", { account: email });
+    await audit(adminEmail, "drive_connected", { account: email });
     return { account: email };
   }
 
   async function accessToken() {
     if (cache.token && cache.exp > Date.now() + 60000) return cache.token;
-    const s = settings();
-    if (!s.refresh_token_enc)
+    const s = await settings();
+    if (!s?.refresh_token_enc)
       throw new DriveSyncError(409, "Google Drive is not connected.");
     const c = config();
     let tok;
@@ -284,10 +292,12 @@ export function createDriveSyncService({
     const f = await r.json();
     if (f.mimeType !== FOLDER_MIME)
       throw new DriveSyncError(400, "That item is not a folder.");
-    db.prepare(
-      "UPDATE drive_settings SET folder_id = ?, folder_name = ? WHERE id = 1",
-    ).run(id, String(f.name || "").slice(0, 200));
-    audit(actor, "drive_folder_selected", { folder: f.name });
+    await db
+      .prepare(
+        "UPDATE drive_settings SET folder_id = ?, folder_name = ? WHERE id = 1",
+      )
+      .run(id, String(f.name || "").slice(0, 200));
+    await audit(actor, "drive_folder_selected", { folder: f.name });
     return { id, name: f.name };
   }
 
@@ -313,31 +323,33 @@ export function createDriveSyncService({
     return out;
   }
 
-  function recordFile(f, status, error, c = {}) {
-    db.prepare(
-      `INSERT INTO drive_files(file_id,name,modified_time,md5,status,error,synced_at,total,inserted,updated,unchanged)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(file_id) DO UPDATE SET name=excluded.name, modified_time=excluded.modified_time, md5=excluded.md5,
-        status=excluded.status, error=excluded.error, synced_at=excluded.synced_at, total=excluded.total,
-        inserted=excluded.inserted, updated=excluded.updated, unchanged=excluded.unchanged`,
-    ).run(
-      f.id,
-      String(f.name || "").slice(0, 200),
-      f.modifiedTime || "",
-      f.md5Checksum || "",
-      status,
-      String(error || "").slice(0, 500),
-      now(),
-      c.total || 0,
-      c.inserted || 0,
-      c.updated || 0,
-      c.unchanged || 0,
-    );
+  async function recordFile(f, status, error, c = {}) {
+    await db
+      .prepare(
+        `INSERT INTO drive_files(file_id,name,modified_time,md5,status,error,synced_at,total,inserted,updated,unchanged)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(file_id) DO UPDATE SET name=excluded.name, modified_time=excluded.modified_time, md5=excluded.md5,
+          status=excluded.status, error=excluded.error, synced_at=excluded.synced_at, total=excluded.total,
+          inserted=excluded.inserted, updated=excluded.updated, unchanged=excluded.unchanged`,
+      )
+      .run(
+        f.id,
+        String(f.name || "").slice(0, 200),
+        f.modifiedTime || "",
+        f.md5Checksum || "",
+        status,
+        String(error || "").slice(0, 500),
+        now(),
+        c.total || 0,
+        c.inserted || 0,
+        c.updated || 0,
+        c.unchanged || 0,
+      );
     return { fileId: f.id, name: f.name, status, error: error || "", ...c };
   }
 
   async function syncFile(f, token, actor) {
-    const prev = db
+    const prev = await db
       .prepare("SELECT * FROM drive_files WHERE file_id = ?")
       .get(f.id);
     const modified = f.modifiedTime || "",
@@ -391,7 +403,7 @@ export function createDriveSyncService({
         parsed?.error || "No payment table could be read from this file.",
       );
     try {
-      const result = weeklyPayments.importRecords(
+      const result = await weeklyPayments.importRecords(
         { fileName: f.name, fileHash, records: parsed.records },
         actor,
       );
@@ -412,14 +424,16 @@ export function createDriveSyncService({
   }
 
   async function runSync(trigger, actor) {
-    const s = settings();
-    if (!s.refresh_token_enc)
+    const s = await settings();
+    if (!s?.refresh_token_enc)
       throw new DriveSyncError(409, "Google Drive is not connected.");
     if (!s.folder_id)
       throw new DriveSyncError(409, "Choose the payment folder first.");
-    db.prepare(
-      "UPDATE drive_settings SET last_status = 'pending', last_error = '' WHERE id = 1",
-    ).run();
+    await db
+      .prepare(
+        "UPDATE drive_settings SET last_status = 'pending', last_error = '' WHERE id = 1",
+      )
+      .run();
     try {
       const token = await accessToken();
       const files = (await listExcelFiles(s.folder_id, token)).sort((a, b) =>
@@ -431,10 +445,12 @@ export function createDriveSyncService({
       if (!files.length) {
         const msg =
           "No Excel (.xlsx or .xls) payment files were found in the folder.";
-        db.prepare(
-          "UPDATE drive_settings SET last_sync_at = ?, last_status = 'failed', last_error = ? WHERE id = 1",
-        ).run(now(), msg);
-        audit(actor, "drive_sync", { trigger, files: 0, error: msg });
+        await db
+          .prepare(
+            "UPDATE drive_settings SET last_sync_at = ?, last_status = 'failed', last_error = ? WHERE id = 1",
+          )
+          .run(now(), msg);
+        await audit(actor, "drive_sync", { trigger, files: 0, error: msg });
         return {
           status: "failed",
           error: msg,
@@ -452,15 +468,17 @@ export function createDriveSyncService({
         .map((r) => `${r.name}: ${r.error}`)
         .join(" ")
         .slice(0, 1000);
-      db.prepare(
-        "UPDATE drive_settings SET last_sync_at = ?, last_status = ?, last_error = ? WHERE id = 1",
-      ).run(now(), status, error);
+      await db
+        .prepare(
+          "UPDATE drive_settings SET last_sync_at = ?, last_status = ?, last_error = ? WHERE id = 1",
+        )
+        .run(now(), status, error);
       const totals = {
         inserted: results.reduce((n, r) => n + (r.inserted || 0), 0),
         updated: results.reduce((n, r) => n + (r.updated || 0), 0),
         unchanged: results.reduce((n, r) => n + (r.unchanged || 0), 0),
       };
-      audit(actor || "Google Drive sync", "drive_sync", {
+      await audit(actor || "Google Drive sync", "drive_sync", {
         trigger,
         files: results.length,
         failed: failed.length,
@@ -480,9 +498,11 @@ export function createDriveSyncService({
         err instanceof DriveSyncError
           ? err.message
           : "Google Drive sync failed. Please try again.";
-      db.prepare(
-        "UPDATE drive_settings SET last_sync_at = ?, last_status = 'failed', last_error = ? WHERE id = 1",
-      ).run(now(), msg.slice(0, 1000));
+      await db
+        .prepare(
+          "UPDATE drive_settings SET last_sync_at = ?, last_status = 'failed', last_error = ? WHERE id = 1",
+        )
+        .run(now(), msg.slice(0, 1000));
       if (!(err instanceof DriveSyncError))
         console.error("Drive sync failed:", err && err.message);
       throw err instanceof DriveSyncError ? err : new DriveSyncError(502, msg);
@@ -500,9 +520,9 @@ export function createDriveSyncService({
 
   function schedule(minutes) {
     const ms = Math.max(5, Number(minutes) || 15) * 60000;
-    const timer = setInterval(() => {
-      const s = settings();
-      if (!s.refresh_token_enc || !s.folder_id) return;
+    const timer = setInterval(async () => {
+      const s = await settings();
+      if (!s?.refresh_token_enc || !s.folder_id) return;
       sync({ trigger: "scheduled" }).catch((err) =>
         console.error("Scheduled Drive sync:", err.message),
       );
@@ -512,8 +532,8 @@ export function createDriveSyncService({
   }
 
   async function disconnect({ actor }) {
-    const s = settings();
-    if (s.refresh_token_enc) {
+    const s = await settings();
+    if (s?.refresh_token_enc) {
       try {
         const rt = open(s.refresh_token_enc);
         await fetchImpl(REVOKE_URL, {
@@ -525,34 +545,36 @@ export function createDriveSyncService({
         /* revoking is best effort; the token is removed below either way */
       }
     }
-    db.prepare(
-      "UPDATE drive_settings SET refresh_token_enc = '', connected_email = '', connected_by = '', connected_at = '', folder_id = '', folder_name = '', last_status = '', last_error = '' WHERE id = 1",
-    ).run();
+    await db
+      .prepare(
+        "UPDATE drive_settings SET refresh_token_enc = '', connected_email = '', connected_by = '', connected_at = '', folder_id = '', folder_name = '', last_status = '', last_error = '' WHERE id = 1",
+      )
+      .run();
     cache = { token: "", exp: 0 };
-    audit(actor, "drive_disconnected", {});
+    await audit(actor, "drive_disconnected", {});
     return { ok: true };
   }
 
   // What the Admin Portal shows. Never includes a token.
-  function status() {
-    const s = settings();
-    const files = db
+  async function status() {
+    const s = (await settings()) || {};
+    const fileRows = await db
       .prepare(
         "SELECT file_id, name, modified_time, status, error, synced_at, total, inserted, updated, unchanged FROM drive_files ORDER BY name",
       )
-      .all()
-      .map((f) => ({
-        fileId: f.file_id,
-        name: f.name,
-        modifiedTime: f.modified_time,
-        status: f.status,
-        error: f.error,
-        syncedAt: f.synced_at,
-        total: f.total,
-        inserted: f.inserted,
-        updated: f.updated,
-        unchanged: f.unchanged,
-      }));
+      .all();
+    const files = fileRows.map((f) => ({
+      fileId: f.file_id,
+      name: f.name,
+      modifiedTime: f.modified_time,
+      status: f.status,
+      error: f.error,
+      syncedAt: f.synced_at,
+      total: f.total,
+      inserted: f.inserted,
+      updated: f.updated,
+      unchanged: f.unchanged,
+    }));
     return {
       configured: !!(
         env.GOOGLE_CLIENT_ID &&
@@ -561,11 +583,11 @@ export function createDriveSyncService({
         env.DRIVE_TOKEN_SECRET.length >= 16
       ),
       connected: !!s.refresh_token_enc,
-      account: s.connected_email,
-      folder: s.folder_id ? { id: s.folder_id, name: s.folder_name } : null,
-      lastSyncAt: s.last_sync_at,
-      lastStatus: s.last_status,
-      lastError: s.last_error,
+      account: s.connected_email || "",
+      folder: s.folder_id ? { id: s.folder_id, name: s.folder_name || "" } : null,
+      lastSyncAt: s.last_sync_at || "",
+      lastStatus: s.last_status || "",
+      lastError: s.last_error || "",
       files,
     };
   }

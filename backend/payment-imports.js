@@ -13,8 +13,7 @@
 //   no_partner  The rider exists but was registered by the Admin, or the owner is not an active partner, or the
 //               registration was rejected. Not shared with any partner.
 //
-// The browser parses the Excel file (dashboard/payment-excel.js); this module checks and stores what it is sent,
-// so it can be tested with Node's built-in SQLite.
+// The browser parses the Excel file (dashboard/payment-excel.js); this module checks and stores what it is sent.
 import crypto from "node:crypto";
 import { normalizeRiderKey } from "./rider-registrations.js";
 
@@ -50,12 +49,12 @@ export const normalizeName = (v) =>
     .replace(/[^a-z]+/g, " ")
     .trim();
 
-export function createPaymentImportService({
+export async function createPaymentImportService({
   db,
-  audit = () => {},
+  audit = async () => {},
   now = () => new Date().toISOString(),
 }) {
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS payment_import_versions(
       id TEXT PRIMARY KEY,
       seq INTEGER NOT NULL UNIQUE,
@@ -87,8 +86,8 @@ export function createPaymentImportService({
     CREATE INDEX IF NOT EXISTS payment_import_rows_owner ON payment_import_rows(owner_account_id, version_id);`);
 
   // Registrations and owners are read once per import, so a whole file is matched against one consistent snapshot.
-  function loadMatchIndex() {
-    const regs = db
+  async function loadMatchIndex(executor = db) {
+    const regs = await executor
       .prepare(
         `SELECT r.id, r.rider_id, r.rider_key, r.rider_name, r.registration_source, r.application_status,
         r.owner_account_id, r.owner_login_id, a.role AS owner_role, a.status AS owner_status, a.login_id AS owner_login
@@ -210,19 +209,19 @@ export function createPaymentImportService({
     return { rows: [...kept.values()], skipped, duplicates };
   }
 
-  function activeVersion() {
+  async function activeVersion(executor = db) {
     return (
-      db
+      (await executor
         .prepare(
           "SELECT * FROM payment_import_versions ORDER BY seq DESC LIMIT 1",
         )
-        .get() || null
+        .get()) || null
     );
   }
 
   // Imports one file. project(versionId, matchedRows) runs inside the same transaction, so the partner data is
   // changed only together with the new version (and rolled back with it if anything fails).
-  function importRows(body, actor = "", project = () => {}) {
+  async function importRows(body, actor = "", project = async () => {}) {
     const records = body?.records;
     if (!Array.isArray(records) || !records.length)
       throw new PaymentImportError(
@@ -238,7 +237,7 @@ export function createPaymentImportService({
     const fileHash = clean(body.fileHash).slice(0, 128);
 
     if (fileHash) {
-      const same = db
+      const same = await db
         .prepare(
           "SELECT * FROM payment_import_versions WHERE file_hash = ? ORDER BY seq DESC LIMIT 1",
         )
@@ -247,7 +246,7 @@ export function createPaymentImportService({
         return {
           alreadyImported: true,
           version: versionSummary(same),
-          activeVersionId: activeVersion()?.id || null,
+          activeVersionId: (await activeVersion())?.id || null,
         };
     }
     const { rows, skipped, duplicates } = prepare(records);
@@ -257,7 +256,7 @@ export function createPaymentImportService({
         "None of the rows could be read. Each row needs a rider name, a date (for example 2026-10-26) and numeric order counts.",
       );
 
-    const index = loadMatchIndex();
+    const index = await loadMatchIndex();
     const matched = rows.map((r) => ({ ...r, ...matchRow(r, index) }));
     const counts = { matched: 0, review: 0, unmatched: 0, no_partner: 0 };
     matched.forEach((m) => {
@@ -266,37 +265,42 @@ export function createPaymentImportService({
 
     const id = crypto.randomUUID(),
       at = now();
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      const seq =
-        db
-          .prepare(
-            "SELECT COALESCE(MAX(seq), 0) AS m FROM payment_import_versions",
-          )
-          .get().m + 1;
-      db.prepare(
-        `INSERT INTO payment_import_versions(id,seq,file_name,file_hash,imported_at,imported_by,row_count,matched,review,unmatched,no_partner,skipped,duplicates)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      ).run(
-        id,
-        seq,
-        fileName,
-        fileHash,
-        at,
-        clean(actor).slice(0, 200),
-        matched.length,
-        counts.matched,
-        counts.review,
-        counts.unmatched,
-        counts.no_partner,
-        skipped,
-        duplicates,
+    let versionRow;
+    let seq;
+
+    await db.transaction(async (tx) => {
+      const seqRow = await tx
+        .prepare(
+          "SELECT COALESCE(MAX(seq), 0) AS m FROM payment_import_versions",
+        )
+        .get();
+      seq = Number(seqRow?.m || 0) + 1;
+      await tx
+        .prepare(
+          `INSERT INTO payment_import_versions(id,seq,file_name,file_hash,imported_at,imported_by,row_count,matched,review,unmatched,no_partner,skipped,duplicates)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          id,
+          seq,
+          fileName,
+          fileHash,
+          at,
+          clean(actor).slice(0, 200),
+          matched.length,
+          counts.matched,
+          counts.review,
+          counts.unmatched,
+          counts.no_partner,
+          skipped,
+          duplicates,
+        );
+      const insert = tx.prepare(
+        `INSERT INTO payment_import_rows(version_id,row_no,rider_id,rider_key,rider_name,date,lm,primary_orders,club,sdd,sdd_amount,amount,
+        match_status,match_note,registration_id,owner_account_id,owner_login_id,owner_role) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       );
-      const insert =
-        db.prepare(`INSERT INTO payment_import_rows(version_id,row_no,rider_id,rider_key,rider_name,date,lm,primary_orders,club,sdd,sdd_amount,amount,
-        match_status,match_note,registration_id,owner_account_id,owner_login_id,owner_role) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       for (const m of matched) {
-        insert.run(
+        await insert.run(
           id,
           m.rowNo,
           m.riderId,
@@ -317,36 +321,31 @@ export function createPaymentImportService({
           m.ownerRole || "",
         );
       }
-      project(
+      await project(
         id,
         matched.filter((m) => m.status === MATCH.MATCHED),
+        tx,
       );
-      db.exec("COMMIT");
-      audit(actor, "payment_import_version", {
-        fileName,
-        versionId: id,
-        seq,
-        rows: matched.length,
-        ...counts,
-      });
-      const version = db
+      versionRow = await tx
         .prepare("SELECT * FROM payment_import_versions WHERE id = ?")
         .get(id);
-      return {
-        alreadyImported: false,
-        version: versionSummary(version),
-        activeVersionId: id,
-        skipped,
-        duplicates,
-      };
-    } catch (err) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {
-        /* nothing to roll back */
-      }
-      throw err;
-    }
+    })();
+
+    await audit(actor, "payment_import_version", {
+      fileName,
+      versionId: id,
+      seq,
+      rows: matched.length,
+      ...counts,
+    });
+
+    return {
+      alreadyImported: false,
+      version: versionSummary(versionRow),
+      activeVersionId: id,
+      skipped,
+      duplicates,
+    };
   }
 
   function versionSummary(v) {
@@ -366,24 +365,27 @@ export function createPaymentImportService({
     };
   }
 
-  function listVersions() {
-    const active = activeVersion();
+  async function listVersions() {
+    const active = await activeVersion();
+    const versionRows = await db
+      .prepare("SELECT * FROM payment_import_versions ORDER BY seq DESC")
+      .all();
     return {
       activeVersionId: active?.id || null,
-      versions: db
-        .prepare("SELECT * FROM payment_import_versions ORDER BY seq DESC")
-        .all()
-        .map((v) => ({ ...versionSummary(v), active: v.id === active?.id })),
+      versions: versionRows.map((v) => ({
+        ...versionSummary(v),
+        active: v.id === active?.id,
+      })),
     };
   }
 
   // Rows of one version (default: the active version). Admin sees all rows; a partner only sees its own matched rows.
-  function rowsOf({ versionId, status, ownerAccountId } = {}) {
+  async function rowsOf({ versionId, status, ownerAccountId } = {}) {
     const version = versionId
-      ? db
+      ? await db
           .prepare("SELECT * FROM payment_import_versions WHERE id = ?")
           .get(versionId)
-      : activeVersion();
+      : await activeVersion();
     if (!version) return { version: null, rows: [] };
     const params = [version.id];
     let where = "version_id = ?";
@@ -395,9 +397,9 @@ export function createPaymentImportService({
       where += " AND match_status = ? AND owner_account_id = ?";
       params.push(MATCH.MATCHED, ownerAccountId);
     }
-    const rows = db
+    const rows = await db
       .prepare(
-        `SELECT * FROM payment_import_rows WHERE ${where} ORDER BY date DESC, rider_name COLLATE NOCASE, row_no`,
+        `SELECT * FROM payment_import_rows WHERE ${where} ORDER BY date DESC, LOWER(rider_name), row_no`,
       )
       .all(...params);
     return { version: versionSummary(version), rows: rows.map(shapeRow) };
