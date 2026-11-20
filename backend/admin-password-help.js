@@ -12,6 +12,8 @@
 //   out and any unused email reset link stops working. The password is returned once and never stored in clear.
 // - Every request and every temporary password is written to the audit log.
 
+import crypto from "node:crypto";
+
 export const HELP_REQUEST_MESSAGE =
   "Reset emails cannot be sent from this server right now, so no link was emailed. " +
   "If that email belongs to an authorized admin account, your Super Admin has been asked to help: " +
@@ -19,41 +21,43 @@ export const HELP_REQUEST_MESSAGE =
 const EMAIL_RE = /^[^\s@<>()\\",;:]+@[^\s@<>()\\",;:]+\.[^\s@<>()\\",;:]+$/;
 const SHOW_DAYS = 7;
 
-export function createPasswordHelpService({
+export async function createPasswordHelpService({
   db,
   auth,
-  audit = () => {},
+  audit = async () => {},
   now = () => new Date().toISOString(),
 }) {
-  db.exec(`CREATE TABLE IF NOT EXISTS admin_password_help(
+  await db.exec(`CREATE TABLE IF NOT EXISTS admin_password_help(
     account_id TEXT PRIMARY KEY,
     requested_at TEXT NOT NULL,
     times INTEGER NOT NULL DEFAULT 1
   );`);
 
-  function requestHelp({ email }) {
+  async function requestHelp({ email }) {
     const answer = { ok: true, mode: "super_admin", message: HELP_REQUEST_MESSAGE };
     const address = String(email ?? "")
       .trim()
       .toLowerCase()
       .slice(0, 254);
     if (!EMAIL_RE.test(address)) return answer;
-    const account = auth.findAdminByEmail(address); // active admins only
+    const account = await auth.findAdminByEmail(address); // active admins only
     if (!account) return answer;
-    db.prepare(
-      `INSERT INTO admin_password_help(account_id, requested_at, times) VALUES(?,?,1)
-       ON CONFLICT(account_id) DO UPDATE SET requested_at=excluded.requested_at, times=admin_password_help.times+1`,
-    ).run(account.id, now());
-    audit(account.email || account.login_id, "password_help_requested", {
+    await db
+      .prepare(
+        `INSERT INTO admin_password_help(account_id, requested_at, times) VALUES(?,?,1)
+         ON CONFLICT(account_id) DO UPDATE SET requested_at=EXCLUDED.requested_at, times=admin_password_help.times+1`,
+      )
+      .run(account.id, now());
+    await audit(account.email || account.login_id, "password_help_requested", {
       by: "self",
     });
     return answer;
   }
 
   // Open requests by login ID: {requestedAt, times}. A request ends when the admin signs in or the password changes.
-  function openRequests() {
+  async function openRequests() {
     const since = new Date(Date.parse(now()) - SHOW_DAYS * 86400000).toISOString();
-    const rows = db
+    const rows = await db
       .prepare(
         `SELECT a.login_id, h.requested_at, h.times FROM admin_password_help h
          JOIN accounts a ON a.id = h.account_id
@@ -68,7 +72,7 @@ export function createPasswordHelpService({
   }
 
   async function issueTemporaryPassword({ loginId, actorAccountId, actorEmail }) {
-    const target = auth.adminByLoginId(loginId);
+    const target = await auth.adminByLoginId(loginId);
     if (!target)
       return { ok: false, status: 404, error: "That admin account was not found." };
     if (target.id === actorAccountId)
@@ -85,12 +89,14 @@ export function createPasswordHelpService({
       };
     const password = auth.tempPassword();
     await auth.setPassword(target.id, password, { mustChange: true });
-    auth.endAllSessions(target.id);
-    db.prepare(
-      "UPDATE password_resets SET used_at=? WHERE account_id=? AND used_at IS NULL",
-    ).run(now(), target.id);
-    db.prepare("DELETE FROM admin_password_help WHERE account_id=?").run(target.id);
-    audit(actorEmail, "temporary_password_issued", {
+    await auth.endAllSessions(target.id);
+    await db
+      .prepare(
+        "UPDATE password_resets SET used_at=? WHERE account_id=? AND used_at IS NULL",
+      )
+      .run(now(), target.id);
+    await db.prepare("DELETE FROM admin_password_help WHERE account_id=?").run(target.id);
+    await audit(actorEmail, "temporary_password_issued", {
       target: target.email || target.login_id,
     });
     return {
