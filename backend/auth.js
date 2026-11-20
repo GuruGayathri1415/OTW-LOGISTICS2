@@ -19,8 +19,8 @@ const LONG_SESSION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days ("Remember me" and 
 const TEMP_ALPHABET =
   "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"; // no 0/O, 1/l/I
 
-export function createAuth(db) {
-  db.exec(`
+export async function createAuth(db) {
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS accounts(
       id TEXT PRIMARY KEY, role TEXT NOT NULL, login_id TEXT NOT NULL UNIQUE, email TEXT, name TEXT,
       password_hash TEXT NOT NULL, must_change_password INTEGER NOT NULL DEFAULT 1,
@@ -36,25 +36,24 @@ export function createAuth(db) {
       expires_at TEXT NOT NULL, used_at TEXT);
     CREATE INDEX IF NOT EXISTS password_resets_account ON password_resets(account_id);
   `);
+
+  const existingCols = await db
+    .prepare(
+      `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'accounts'`,
+    )
+    .all();
+  const colSet = new Set(existingCols.map((c) => c.column_name));
+
   // Older databases have no admin_role column. Adding it changes nobody's access: every admin keeps the
   // permissions they had; 'super_admin' only unlocks the Admin Accounts section (see ensureSuperAdmin below).
-  if (
-    !db
-      .prepare("PRAGMA table_info(accounts)")
-      .all()
-      .some((c) => c.name === "admin_role")
-  ) {
-    db.exec("ALTER TABLE accounts ADD COLUMN admin_role TEXT");
+  if (!colSet.has("admin_role")) {
+    await db.exec("ALTER TABLE accounts ADD COLUMN admin_role TEXT");
   }
   // Partner bans (Admin > Client > Ban): columns added to older databases; nobody is banned by the upgrade.
-  {
-    const cols = db
-      .prepare("PRAGMA table_info(accounts)")
-      .all()
-      .map((c) => c.name);
-    for (const col of ["banned_at", "banned_until", "ban_reason", "banned_by"])
-      if (!cols.includes(col))
-        db.exec(`ALTER TABLE accounts ADD COLUMN ${col} TEXT`);
+  for (const col of ["banned_at", "banned_until", "ban_reason", "banned_by"]) {
+    if (!colSet.has(col)) {
+      await db.exec(`ALTER TABLE accounts ADD COLUMN ${col} TEXT`);
+    }
   }
 
   const now = () => new Date().toISOString();
@@ -97,7 +96,6 @@ export function createAuth(db) {
   function tempPassword() {
     const pick = () => TEMP_ALPHABET[crypto.randomInt(TEMP_ALPHABET.length)];
     const group = () => Array.from({ length: 4 }, pick).join("");
-    // Always contains letters and digits so it passes passwordProblem().
     let pw;
     do {
       pw = `${group()}-${group()}-${group()}`;
@@ -116,15 +114,14 @@ export function createAuth(db) {
     adminByEmailOrLogin: db.prepare(
       `SELECT * FROM accounts WHERE role='admin' AND (lower(trim(email))=? OR lower(trim(login_id))=?)`,
     ),
-    insert:
-      db.prepare(`INSERT INTO accounts(id,role,login_id,email,name,password_hash,must_change_password,status,application_id,created_at,updated_at)
-                        VALUES(@id,@role,@login_id,@email,@name,@password_hash,@must_change_password,@status,@application_id,@created_at,@updated_at)`),
+    insert: db.prepare(
+      `INSERT INTO accounts(id,role,login_id,email,name,password_hash,must_change_password,status,application_id,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+    ),
   };
-  // The current ban of a vendor / franchise login, or null. A ban with an end time stops by itself at that time;
-  // without one it lasts until an admin unbans the partner.
+
   function banInfo(a) {
-    if (!a || !a.banned_at || (a.role !== "vendor" && a.role !== "franchise"))
-      return null;
+    if (!a || !a.banned_at || (a.role !== "vendor" && a.role !== "franchise")) return null;
     if (a.banned_until && a.banned_until <= now()) return null;
     return {
       since: a.banned_at,
@@ -148,7 +145,6 @@ export function createAuth(db) {
       isSuperAdmin: a.role === "admin" && a.admin_role === "super_admin",
     };
   }
-  // Partners type IDs in many ways ("vn-2", "VN000002", old "FR-000001"); normalise to the stored form.
   function normaliseLoginId(role, loginId) {
     const raw = String(loginId || "").trim();
     if (role === "admin" || raw.includes("@")) return raw.toLowerCase();
@@ -160,25 +156,23 @@ export function createAuth(db) {
     const prefix = m[1] === "FR" ? "FP" : m[1];
     return `${prefix}-${m[2].padStart(6, "0")}`;
   }
-  function findForLogin(role, loginId) {
+  async function findForLogin(role, loginId) {
     const id = normaliseLoginId(role, loginId);
     if (!id) return { account: null };
     if (role !== "admin" && id.includes("@")) {
-      const rows = q.byEmailRole.all(id, role);
+      const rows = await q.byEmailRole.all(id, role);
       if (rows.length > 1) return { account: null, ambiguous: true };
       return { account: rows[0] || null };
     }
-    const a = q.byLogin.get(id);
+    const a = await q.byLogin.get(id);
     return { account: a && a.role === role ? a : null };
   }
-  // All accounts an ID / email could mean (one for IDs; several partners may share an email).
-  function findCandidates(role, loginId) {
+  async function findCandidates(role, loginId) {
     const id = normaliseLoginId(role, loginId);
     if (!id) return [];
-    // Admin: the registered email, ignoring capitals and stray spaces (phones often add them).
     if (role === "admin") return q.adminByEmailOrLogin.all(id, id);
     if (id.includes("@")) return q.byEmailRole.all(id, role);
-    const a = q.byLogin.get(id);
+    const a = await q.byLogin.get(id);
     return a && a.role === role ? [a] : [];
   }
   async function createAccount({
@@ -191,27 +185,29 @@ export function createAuth(db) {
     applicationId = null,
   }) {
     const t = now();
-    const row = {
-      id: crypto.randomUUID(),
+    const id = crypto.randomUUID();
+    await q.insert.run(
+      id,
       role,
-      login_id: normaliseLoginId(role, loginId),
+      normaliseLoginId(role, loginId),
       email,
       name,
-      password_hash: await hashPassword(password),
-      must_change_password: mustChange ? 1 : 0,
-      status: "active",
-      application_id: applicationId,
-      created_at: t,
-      updated_at: t,
-    };
-    q.insert.run(row);
-    return q.byId.get(row.id);
+      await hashPassword(password),
+      mustChange ? 1 : 0,
+      "active",
+      applicationId,
+      t,
+      t,
+    );
+    return q.byId.get(id);
   }
   async function setPassword(accountId, password, { mustChange }) {
     const t = now();
-    db.prepare(
-      "UPDATE accounts SET password_hash=?,must_change_password=?,password_changed_at=?,updated_at=? WHERE id=?",
-    ).run(await hashPassword(password), mustChange ? 1 : 0, t, t, accountId);
+    await db
+      .prepare(
+        "UPDATE accounts SET password_hash=?,must_change_password=?,password_changed_at=?,updated_at=? WHERE id=?",
+      )
+      .run(await hashPassword(password), mustChange ? 1 : 0, t, t, accountId);
   }
 
   // ---------- sessions ----------
@@ -256,28 +252,28 @@ export function createAuth(db) {
     else if (maxAgeMs) c += `; Max-Age=${Math.floor(maxAgeMs / 1000)}`;
     return c;
   }
-  function startSession(req, res, account, { remember = false } = {}) {
+  async function startSession(req, res, account, { remember = false } = {}) {
     const token = crypto.randomBytes(32).toString("base64url");
     const life =
       account.role === "admin" && !remember
         ? SHORT_SESSION_MS
         : LONG_SESSION_MS;
     const t = now();
-    db.prepare(
-      "INSERT INTO sessions(token_hash,account_id,role,created_at,expires_at,last_seen_at) VALUES(?,?,?,?,?,?)",
-    ).run(
-      sha256(token),
-      account.id,
-      account.role,
-      t,
-      new Date(Date.now() + life).toISOString(),
-      t,
-    );
-    db.prepare("UPDATE accounts SET last_login_at=? WHERE id=?").run(
-      t,
-      account.id,
-    );
-    // Admin without "Remember me": browser-session cookie (cleared when the browser closes).
+    await db
+      .prepare(
+        "INSERT INTO sessions(token_hash,account_id,role,created_at,expires_at,last_seen_at) VALUES(?,?,?,?,?,?)",
+      )
+      .run(
+        sha256(token),
+        account.id,
+        account.role,
+        t,
+        new Date(Date.now() + life).toISOString(),
+        t,
+      );
+    await db
+      .prepare("UPDATE accounts SET last_login_at=? WHERE id=?")
+      .run(t, account.id);
     res.append(
       "Set-Cookie",
       cookieHeader(
@@ -288,45 +284,48 @@ export function createAuth(db) {
       ),
     );
   }
-  function getSession(req, role) {
+  async function getSession(req, role) {
     const token = parseCookies(req)[COOKIE[role]];
     if (!token) return null;
-    const s = db
+    const s = await db
       .prepare("SELECT * FROM sessions WHERE token_hash=?")
       .get(sha256(token));
     if (!s || s.role !== role || s.expires_at < now()) return null;
-    const account = q.byId.get(s.account_id);
+    const account = await q.byId.get(s.account_id);
     if (!account || account.status !== "active" || account.role !== role)
       return null;
-    if (banInfo(account)) return null; // banned: signed out everywhere
+    if (banInfo(account)) return null;
     return { account, tokenHash: s.token_hash };
   }
-  function endSession(req, res, role) {
+  async function endSession(req, res, role) {
     const token = parseCookies(req)[COOKIE[role]];
-    if (token)
-      db.prepare("DELETE FROM sessions WHERE token_hash=?").run(sha256(token));
+    if (token) {
+      await db
+        .prepare("DELETE FROM sessions WHERE token_hash=?")
+        .run(sha256(token));
+    }
     res.append("Set-Cookie", cookieHeader(req, COOKIE[role], "", 0));
   }
-  function endAllSessions(accountId, exceptTokenHash = null) {
-    if (exceptTokenHash)
-      db.prepare(
-        "DELETE FROM sessions WHERE account_id=? AND token_hash<>?",
-      ).run(accountId, exceptTokenHash);
-    else db.prepare("DELETE FROM sessions WHERE account_id=?").run(accountId);
+  async function endAllSessions(accountId, exceptTokenHash = null) {
+    if (exceptTokenHash) {
+      await db
+        .prepare("DELETE FROM sessions WHERE account_id=? AND token_hash<>?")
+        .run(accountId, exceptTokenHash);
+    } else {
+      await db.prepare("DELETE FROM sessions WHERE account_id=?").run(accountId);
+    }
   }
-  function cleanupSessions() {
-    db.prepare("DELETE FROM sessions WHERE expires_at<?").run(now());
-    db.prepare("DELETE FROM password_resets WHERE created_at<?").run(
-      new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
-    );
+  async function cleanupSessions() {
+    await db.prepare("DELETE FROM sessions WHERE expires_at<?").run(now());
+    await db
+      .prepare("DELETE FROM password_resets WHERE created_at<?")
+      .run(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString());
   }
 
-  // Express middleware: the request must come from a signed-in account of one of these roles
-  // that has already replaced its temporary password.
   function requireRole(...roles) {
-    return (req, res, next) => {
+    return async (req, res, next) => {
       for (const role of roles) {
-        const s = getSession(req, role);
+        const s = await getSession(req, role);
         if (!s) continue;
         if (s.account.must_change_password)
           return res.status(403).json({
@@ -346,57 +345,60 @@ export function createAuth(db) {
   }
 
   // ---------- admin password reset by email ----------
-  // A link token is random, is stored only as a hash, works once, lasts 30 minutes, and only the newest link works.
   const RESET_MS = 30 * 60 * 1000;
   const RESET_LIMIT_WINDOW_MS = 60 * 60 * 1000;
   const RESET_LIMIT_PER_WINDOW = 5;
-  // The active admin whose registered email (or login ID) is this address, or null when there is no single match.
-  function findAdminByEmail(email) {
+
+  async function findAdminByEmail(email) {
     const e = String(email || "")
       .trim()
       .toLowerCase();
     if (!e) return null;
-    const rows = q.adminByEmailOrLogin
-      .all(e, e)
-      .filter((a) => a.status === "active");
+    const rows = (await q.adminByEmailOrLogin.all(e, e)).filter(
+      (a) => a.status === "active",
+    );
     return rows.length === 1 ? rows[0] : null;
   }
-  function recentResetCount(accountId, windowMs = RESET_LIMIT_WINDOW_MS) {
+  async function recentResetCount(accountId, windowMs = RESET_LIMIT_WINDOW_MS) {
     const since = new Date(Date.now() - windowMs).toISOString();
-    return db
+    const row = await db
       .prepare(
         "SELECT COUNT(*) AS n FROM password_resets WHERE account_id=? AND created_at>=?",
       )
-      .get(accountId, since).n;
+      .get(accountId, since);
+    return Number(row?.n || 0);
   }
-  function createPasswordReset(accountId) {
+  async function createPasswordReset(accountId) {
     const token = crypto.randomBytes(32).toString("base64url");
     const t = now();
-    db.prepare(
-      "UPDATE password_resets SET used_at=? WHERE account_id=? AND used_at IS NULL",
-    ).run(t, accountId);
-    db.prepare(
-      "INSERT INTO password_resets(token_hash,account_id,created_at,expires_at) VALUES(?,?,?,?)",
-    ).run(
-      sha256(token),
-      accountId,
-      t,
-      new Date(Date.now() + RESET_MS).toISOString(),
-    );
+    await db
+      .prepare(
+        "UPDATE password_resets SET used_at=? WHERE account_id=? AND used_at IS NULL",
+      )
+      .run(t, accountId);
+    await db
+      .prepare(
+        "INSERT INTO password_resets(token_hash,account_id,created_at,expires_at) VALUES(?,?,?,?)",
+      )
+      .run(
+        sha256(token),
+        accountId,
+        t,
+        new Date(Date.now() + RESET_MS).toISOString(),
+      );
     return token;
   }
-  // Checks a link token and uses it up if it is valid. Returns the admin account, or null.
-  function consumePasswordReset(token) {
+  async function consumePasswordReset(token) {
     const raw = String(token || "");
     if (!/^[A-Za-z0-9_-]{20,}$/.test(raw)) return null;
-    const row = db
+    const row = await db
       .prepare("SELECT * FROM password_resets WHERE token_hash=?")
       .get(sha256(raw));
     if (!row || row.used_at || row.expires_at < now()) return null;
-    const account = q.byId.get(row.account_id);
+    const account = await q.byId.get(row.account_id);
     if (!account || account.role !== "admin" || account.status !== "active")
       return null;
-    const used = db
+    const used = await db
       .prepare(
         "UPDATE password_resets SET used_at=? WHERE token_hash=? AND used_at IS NULL",
       )
@@ -405,13 +407,9 @@ export function createAuth(db) {
   }
 
   // ---------- admin account management (Super Admin) ----------
-  // Exactly one place decides who the Super Admin is. SUPER_ADMIN_EMAIL (backend/.env) names them; otherwise,
-  // when nobody has been named yet, the earliest-created admin becomes Super Admin. Nothing else changes.
-  function ensureSuperAdmin(preferredEmail = "") {
-    const admins = db
-      .prepare(
-        `SELECT * FROM accounts WHERE role='admin' ORDER BY created_at, rowid`,
-      )
+  async function ensureSuperAdmin(preferredEmail = "") {
+    const admins = await db
+      .prepare(`SELECT * FROM accounts WHERE role='admin' ORDER BY created_at ASC`)
       .all();
     if (!admins.length) return null;
     const wanted = String(preferredEmail || "")
@@ -426,21 +424,21 @@ export function createAuth(db) {
             .toLowerCase() === wanted,
       );
     if (named && named.admin_role !== "super_admin") {
-      db.prepare(`UPDATE accounts SET admin_role='super_admin' WHERE id=?`).run(
-        named.id,
-      );
+      await db
+        .prepare(`UPDATE accounts SET admin_role='super_admin' WHERE id=?`)
+        .run(named.id);
     }
     if (!admins.some((a) => a.admin_role === "super_admin") && !named) {
-      db.prepare(`UPDATE accounts SET admin_role='super_admin' WHERE id=?`).run(
-        admins[0].id,
-      );
+      await db
+        .prepare(`UPDATE accounts SET admin_role='super_admin' WHERE id=?`)
+        .run(admins[0].id);
     }
     return (
-      db
+      (await db
         .prepare(
-          `SELECT * FROM accounts WHERE role='admin' AND admin_role='super_admin' ORDER BY created_at LIMIT 1`,
+          `SELECT * FROM accounts WHERE role='admin' AND admin_role='super_admin' ORDER BY created_at ASC LIMIT 1`,
         )
-        .get() || null
+        .get()) || null
     );
   }
   function isSuperAdmin(account) {
@@ -451,36 +449,32 @@ export function createAuth(db) {
       account.status === "active"
     );
   }
-  // Admin list for the Super Admin screen: never includes password hashes, reset tokens or session data.
-  function listAdmins() {
-    return db
-      .prepare(
-        `SELECT * FROM accounts WHERE role='admin' ORDER BY created_at, rowid`,
-      )
-      .all()
-      .map((a) => ({
-        loginId: a.login_id,
-        name: a.name || "",
-        email: (a.email || a.login_id || "").trim(),
-        status: a.status,
-        isSuperAdmin: a.admin_role === "super_admin",
-        mustChangePassword: !!a.must_change_password,
-        lastLoginAt: a.last_login_at || null,
-        passwordChangedAt: a.password_changed_at || null,
-        createdAt: a.created_at,
-      }));
+  async function listAdmins() {
+    const rows = await db
+      .prepare(`SELECT * FROM accounts WHERE role='admin' ORDER BY created_at ASC`)
+      .all();
+    return rows.map((a) => ({
+      loginId: a.login_id,
+      name: a.name || "",
+      email: (a.email || a.login_id || "").trim(),
+      status: a.status,
+      isSuperAdmin: a.admin_role === "super_admin",
+      mustChangePassword: !!a.must_change_password,
+      lastLoginAt: a.last_login_at || null,
+      passwordChangedAt: a.password_changed_at || null,
+      createdAt: a.created_at,
+    }));
   }
-  function adminByLoginId(loginId) {
-    const a = q.byLogin.get(
+  async function adminByLoginId(loginId) {
+    const a = await q.byLogin.get(
       String(loginId || "")
         .trim()
         .toLowerCase(),
     );
     return a && a.role === "admin" ? a : null;
   }
-  // Switches an admin on or off. Refuses to switch off yourself or the last active Super Admin.
-  function setAdminStatus(loginId, status, actorAccountId) {
-    const a = adminByLoginId(loginId);
+  async function setAdminStatus(loginId, status, actorAccountId) {
+    const a = await adminByLoginId(loginId);
     if (!a)
       return {
         ok: false,
@@ -496,11 +490,12 @@ export function createAuth(db) {
           status: 400,
           error: "You cannot switch off your own account.",
         };
-      const others = db
+      const othersRow = await db
         .prepare(
           `SELECT COUNT(*) AS n FROM accounts WHERE role='admin' AND admin_role='super_admin' AND status='active' AND id<>?`,
         )
-        .get(a.id).n;
+        .get(a.id);
+      const others = Number(othersRow?.n || 0);
       if (a.admin_role === "super_admin" && !others)
         return {
           ok: false,
@@ -509,44 +504,32 @@ export function createAuth(db) {
             "This is the last active Super Admin and cannot be switched off.",
         };
     }
-    db.prepare("UPDATE accounts SET status=?,updated_at=? WHERE id=?").run(
-      status,
-      now(),
-      a.id,
-    );
-    if (status === "disabled") endAllSessions(a.id);
-    return { ok: true, account: q.byId.get(a.id) };
+    await db
+      .prepare("UPDATE accounts SET status=?,updated_at=? WHERE id=?")
+      .run(status, now(), a.id);
+    if (status === "disabled") await endAllSessions(a.id);
+    return { ok: true, account: await q.byId.get(a.id) };
   }
 
-  // ---------- Super Admin: admin names and registered emails ----------
-  // An admin's registered email is also their sign-in ID (login_id), so it must be unique across all accounts.
-  const ADMIN_EMAIL_RE =
-    /^[^\s@<>()\\",;:]+@[^\s@<>()\\",;:]+\.[^\s@<>()\\",;:]+$/;
+  const ADMIN_EMAIL_RE = /^[^\s@<>()\\",;:]+@[^\s@<>()\\",;:]+\.[^\s@<>()\\",;:]+$/;
   function checkAdminName(name) {
-    const n = String(name ?? "")
-      .replace(/\s+/g, " ")
-      .trim();
+    const n = String(name ?? "").replace(/\s+/g, " ").trim();
     if (!n) return { error: "Enter the admin's full name.", field: "name" };
     if (n.length > 100)
-      return {
-        error: "The name is too long (100 characters at most).",
-        field: "name",
-      };
+      return { error: "The name is too long (100 characters at most).", field: "name" };
     return { value: n };
   }
-  function checkAdminEmail(email, exceptId = null) {
-    const e = String(email ?? "")
-      .trim()
-      .toLowerCase();
+  async function checkAdminEmail(email, exceptId = null) {
+    const e = String(email ?? "").trim().toLowerCase();
     if (!e || e.length > 254 || !ADMIN_EMAIL_RE.test(e))
       return { error: "Enter a valid email address.", field: "email" };
     const clash =
-      q.byLogin.get(e) ||
-      db
+      (await q.byLogin.get(e)) ||
+      (await db
         .prepare(
           "SELECT * FROM accounts WHERE role='admin' AND lower(trim(email))=?",
         )
-        .get(e);
+        .get(e));
     if (clash && clash.id !== exceptId)
       return {
         error: "Another account already uses this email address.",
@@ -555,16 +538,10 @@ export function createAuth(db) {
       };
     return { value: e };
   }
-  // Changes an admin's name and / or registered email. The password stays the same; reset links sent to the old
-  // address stop working. Returns {ok, account, changes, previousEmail} or {ok:false, status, error, field}.
-  function updateAdminDetails(loginId, { name, email } = {}) {
-    const a = adminByLoginId(loginId);
+  async function updateAdminDetails(loginId, { name, email } = {}) {
+    const a = await adminByLoginId(loginId);
     if (!a)
-      return {
-        ok: false,
-        status: 404,
-        error: "That admin account was not found.",
-      };
+      return { ok: false, status: 404, error: "That admin account was not found." };
     const fail = (c) => ({
       ok: false,
       status: c.status || 400,
@@ -584,7 +561,7 @@ export function createAuth(db) {
       }
     }
     if (email !== undefined) {
-      const c = checkAdminEmail(email, a.id);
+      const c = await checkAdminEmail(email, a.id);
       if (c.error) return fail(c);
       if (c.value !== previousEmail || c.value !== a.login_id) {
         newEmail = c.value;
@@ -594,28 +571,25 @@ export function createAuth(db) {
     if (!changes.length && newEmail === a.login_id)
       return { ok: true, account: a, changes, previousEmail };
     const t = now();
-    db.prepare(
-      "UPDATE accounts SET name=?,email=?,login_id=?,updated_at=? WHERE id=?",
-    ).run(newName, newEmail, newEmail, t, a.id);
+    await db
+      .prepare(
+        "UPDATE accounts SET name=?,email=?,login_id=?,updated_at=? WHERE id=?",
+      )
+      .run(newName, newEmail, newEmail, t, a.id);
     if (changes.includes("email"))
-      db.prepare(
-        "UPDATE password_resets SET used_at=? WHERE account_id=? AND used_at IS NULL",
-      ).run(t, a.id);
-    return { ok: true, account: q.byId.get(a.id), changes, previousEmail };
+      await db
+        .prepare(
+          "UPDATE password_resets SET used_at=? WHERE account_id=? AND used_at IS NULL",
+        )
+        .run(t, a.id);
+    return { ok: true, account: await q.byId.get(a.id), changes, previousEmail };
   }
-  // Adds an admin with a temporary password (returned once). They must choose their own password at first sign-in.
   async function addAdmin({ name, email } = {}) {
     const n = checkAdminName(name);
-    if (n.error)
-      return { ok: false, status: 400, error: n.error, field: n.field };
-    const e = checkAdminEmail(email);
+    if (n.error) return { ok: false, status: 400, error: n.error, field: n.field };
+    const e = await checkAdminEmail(email);
     if (e.error)
-      return {
-        ok: false,
-        status: e.status || 400,
-        error: e.error,
-        field: e.field,
-      };
+      return { ok: false, status: e.status || 400, error: e.error, field: e.field };
     const password = tempPassword();
     const account = await createAccount({
       role: "admin",
@@ -628,20 +602,18 @@ export function createAuth(db) {
     return { ok: true, account, password };
   }
 
-  // ---------- partner accounts (created when an application is accepted) ----------
+  // ---------- partner accounts ----------
   function roleForApplication(app) {
     return String(app.type || "").toLowerCase() === "vendor"
       ? "vendor"
       : "franchise";
   }
-  // Creates the login for an accepted application, or re-enables / updates an existing one.
-  // With reset=true (or when no login exists yet) a new temporary password is issued and returned once.
   async function ensurePartnerAccount(app, { reset = false } = {}) {
     const role = roleForApplication(app),
       loginId = normaliseLoginId(role, app.appId);
     const email = String(app.email || "").trim(),
       name = String(app.name || "").trim();
-    let account = q.byApplication.get(app.id),
+    let account = await q.byApplication.get(app.id),
       password = null,
       created = false;
     if (!account) {
@@ -657,123 +629,106 @@ export function createAuth(db) {
       });
       created = true;
     } else {
-      db.prepare(
-        "UPDATE accounts SET role=?,login_id=?,email=?,name=?,status=?,updated_at=? WHERE id=?",
-      ).run(role, loginId, email, name, "active", now(), account.id);
-      if (account.role !== role) endAllSessions(account.id);
+      await db
+        .prepare(
+          "UPDATE accounts SET role=?,login_id=?,email=?,name=?,status=?,updated_at=? WHERE id=?",
+        )
+        .run(role, loginId, email, name, "active", now(), account.id);
+      if (account.role !== role) await endAllSessions(account.id);
       if (reset) {
         password = tempPassword();
         await setPassword(account.id, password, { mustChange: true });
-        endAllSessions(account.id);
+        await endAllSessions(account.id);
       }
-      account = q.byId.get(account.id);
+      account = await q.byId.get(account.id);
     }
     return { account, password, created };
   }
-  // Keeps an existing login in step with its application (type / ID / name / email changes).
-  function syncPartnerAccount(app) {
-    const account = q.byApplication.get(app.id);
+  async function syncPartnerAccount(app) {
+    const account = await q.byApplication.get(app.id);
     if (!account) return null;
     const role = roleForApplication(app);
-    db.prepare(
-      "UPDATE accounts SET role=?,login_id=?,email=?,name=?,updated_at=? WHERE id=?",
-    ).run(
-      role,
-      normaliseLoginId(role, app.appId),
-      String(app.email || ""),
-      String(app.name || ""),
-      now(),
-      account.id,
-    );
-    if (account.role !== role) endAllSessions(account.id);
+    await db
+      .prepare(
+        "UPDATE accounts SET role=?,login_id=?,email=?,name=?,updated_at=? WHERE id=?",
+      )
+      .run(
+        role,
+        normaliseLoginId(role, app.appId),
+        String(app.email || ""),
+        String(app.name || ""),
+        now(),
+        account.id,
+      );
+    if (account.role !== role) await endAllSessions(account.id);
     return q.byId.get(account.id);
   }
-  // Bans the portal login of an application's partner: they are signed out now and cannot sign in until the ban ends
-  // (until = ISO time) or an admin unbans them (until = ""). The application status is not changed.
-  function banPartner(
-    applicationId,
-    { until = "", reason = "", actor = "" } = {},
-  ) {
-    const account = q.byApplication.get(applicationId);
+  async function banPartner(applicationId, { until = "", reason = "", actor = "" } = {}) {
+    const account = await q.byApplication.get(applicationId);
     if (!account || (account.role !== "vendor" && account.role !== "franchise"))
       return {
         ok: false,
         status: 400,
-        error:
-          "This application has no portal login yet, so there is nothing to ban.",
+        error: "This application has no portal login yet, so there is nothing to ban.",
       };
     let untilIso = null;
     if (String(until || "").trim()) {
       const t = Date.parse(until);
       if (!Number.isFinite(t))
-        return {
-          ok: false,
-          status: 400,
-          error: "The end of the ban is not a valid date.",
-        };
+        return { ok: false, status: 400, error: "The end of the ban is not a valid date." };
       if (t <= Date.now() + 60_000)
-        return {
-          ok: false,
-          status: 400,
-          error: "The ban must end in the future.",
-        };
+        return { ok: false, status: 400, error: "The ban must end in the future." };
       if (t > Date.now() + 5 * 366 * 86400000)
         return {
           ok: false,
           status: 400,
-          error:
-            'A ban can last at most 5 years. Choose "Until I unban" instead.',
+          error: "A ban can last at most 5 years. Choose \"Until I unban\" instead.",
         };
       untilIso = new Date(t).toISOString();
     }
     const t = now();
-    db.prepare(
-      "UPDATE accounts SET banned_at=?,banned_until=?,ban_reason=?,banned_by=?,updated_at=? WHERE id=?",
-    ).run(
-      t,
-      untilIso,
-      String(reason || "")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 300),
-      String(actor || "").slice(0, 254),
-      t,
-      account.id,
-    );
-    endAllSessions(account.id);
-    const saved = q.byId.get(account.id);
+    await db
+      .prepare(
+        "UPDATE accounts SET banned_at=?,banned_until=?,ban_reason=?,banned_by=?,updated_at=? WHERE id=?",
+      )
+      .run(
+        t,
+        untilIso,
+        String(reason || "").replace(/\s+/g, " ").trim().slice(0, 300),
+        String(actor || "").slice(0, 254),
+        t,
+        account.id,
+      );
+    await endAllSessions(account.id);
+    const saved = await q.byId.get(account.id);
     return { ok: true, account: saved, ban: banInfo(saved) };
   }
-  function unbanPartner(applicationId) {
-    const account = q.byApplication.get(applicationId);
+  async function unbanPartner(applicationId) {
+    const account = await q.byApplication.get(applicationId);
     if (!account)
-      return {
-        ok: false,
-        status: 400,
-        error: "This application has no portal login.",
-      };
-    db.prepare(
-      "UPDATE accounts SET banned_at=NULL,banned_until=NULL,ban_reason=NULL,banned_by=NULL,updated_at=? WHERE id=?",
-    ).run(now(), account.id);
-    return { ok: true, account: q.byId.get(account.id) };
+      return { ok: false, status: 400, error: "This application has no portal login." };
+    await db
+      .prepare(
+        "UPDATE accounts SET banned_at=NULL,banned_until=NULL,ban_reason=NULL,banned_by=NULL,updated_at=? WHERE id=?",
+      )
+      .run(now(), account.id);
+    return { ok: true, account: await q.byId.get(account.id) };
   }
-  function disablePartnerAccount(applicationId) {
-    const account = q.byApplication.get(applicationId);
+  async function disablePartnerAccount(applicationId) {
+    const account = await q.byApplication.get(applicationId);
     if (!account) return null;
-    db.prepare("UPDATE accounts SET status=?,updated_at=? WHERE id=?").run(
-      "disabled",
-      now(),
-      account.id,
-    );
-    endAllSessions(account.id);
+    await db
+      .prepare("UPDATE accounts SET status=?,updated_at=? WHERE id=?")
+      .run("disabled", now(), account.id);
+    await endAllSessions(account.id);
     return q.byId.get(account.id);
   }
-  function accountsByApplication() {
+  async function accountsByApplication() {
     const map = new Map();
-    for (const a of db
+    const rows = await db
       .prepare("SELECT * FROM accounts WHERE application_id IS NOT NULL")
-      .all())
-      map.set(a.application_id, publicAccount(a));
+      .all();
+    for (const a of rows) map.set(a.application_id, publicAccount(a));
     return map;
   }
 

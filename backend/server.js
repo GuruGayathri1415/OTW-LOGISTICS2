@@ -3,9 +3,9 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
 import crypto from "node:crypto";
-import Database from "better-sqlite3";
 import multer from "multer";
 import nodemailer from "nodemailer";
+import { createPgAdapter } from "./db-adapter.js";
 import { createAuth } from "./auth.js";
 import { createPasswordResetService } from "./password-reset.js";
 import { createPasswordHelpService } from "./admin-password-help.js";
@@ -55,9 +55,6 @@ import { fileURLToPath } from "node:url";
 
 dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// DATA_DIR = the folder that must survive redeploys (database + uploaded documents + document key). Defaults to the
-// backend folder, so running locally with START-WINDOWS.bat works exactly as before. On a server, point it at a
-// persistent disk / volume (for example /data).
 const DATA_DIR = path.resolve(process.env.DATA_DIR || __dirname);
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
@@ -68,36 +65,89 @@ const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "supportontheway@gmail.com";
 const gmailConfig = gmailConfigFrom(process.env);
 const gmailApi = createGmailApi({ config: gmailConfig, log: console });
 
-const db = new Database(path.join(DATA_DIR, "payments.sqlite"));
-db.pragma("journal_mode = WAL");
-db.exec(`CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY,payer_name TEXT NOT NULL,payer_email TEXT,payer_type TEXT,amount INTEGER NOT NULL,frequency TEXT NOT NULL,status TEXT NOT NULL,gateway TEXT NOT NULL DEFAULT 'razorpay',gateway_subscription_id TEXT UNIQUE,mandate_id TEXT,consent_at TEXT NOT NULL,created_at TEXT NOT NULL,next_payment_at TEXT,retry_count INTEGER NOT NULL DEFAULT 0);CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY AUTOINCREMENT,gateway_payment_id TEXT UNIQUE,subscription_id TEXT,gateway_subscription_id TEXT,transaction_id TEXT,amount INTEGER,status TEXT,method TEXT,payer_name TEXT,payment_date TEXT,auto_pay_status TEXT,raw_event TEXT,created_at TEXT);CREATE TABLE IF NOT EXISTS audit_log(id INTEGER PRIMARY KEY AUTOINCREMENT,admin_email TEXT,action TEXT,details TEXT,created_at TEXT);
-CREATE TABLE IF NOT EXISTS partner_applications(id TEXT PRIMARY KEY,app_id TEXT UNIQUE NOT NULL,type TEXT NOT NULL,name TEXT NOT NULL,contact TEXT,mobile TEXT,whatsapp TEXT,email TEXT,state TEXT,district TEXT,city TEXT,pincode TEXT,address TEXT,education TEXT,remarks TEXT,status TEXT NOT NULL DEFAULT 'New',payload TEXT NOT NULL,submitted_at TEXT NOT NULL);`);
-// Each website submission carries a key made once per form. A repeated submit with the same key returns the
-// application that was already saved instead of creating a second one.
-try {
-  db.exec("ALTER TABLE partner_applications ADD COLUMN submission_key TEXT");
-} catch {
-  // column already exists
-}
-db.exec(
+const db = createPgAdapter();
+
+await db.exec(`
+  CREATE TABLE IF NOT EXISTS subscriptions(
+    id TEXT PRIMARY KEY,
+    payer_name TEXT NOT NULL,
+    payer_email TEXT,
+    payer_type TEXT,
+    amount INTEGER NOT NULL,
+    frequency TEXT NOT NULL,
+    status TEXT NOT NULL,
+    gateway TEXT NOT NULL DEFAULT 'razorpay',
+    gateway_subscription_id TEXT UNIQUE,
+    mandate_id TEXT,
+    consent_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    next_payment_at TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS transactions(
+    id BIGSERIAL PRIMARY KEY,
+    gateway_payment_id TEXT UNIQUE,
+    subscription_id TEXT,
+    gateway_subscription_id TEXT,
+    transaction_id TEXT,
+    amount INTEGER,
+    status TEXT,
+    method TEXT,
+    payer_name TEXT,
+    payment_date TEXT,
+    auto_pay_status TEXT,
+    raw_event TEXT,
+    created_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS audit_log(
+    id BIGSERIAL PRIMARY KEY,
+    admin_email TEXT,
+    action TEXT,
+    details TEXT,
+    created_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS partner_applications(
+    id TEXT PRIMARY KEY,
+    app_id TEXT UNIQUE NOT NULL,
+    type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    contact TEXT,
+    mobile TEXT,
+    whatsapp TEXT,
+    email TEXT,
+    state TEXT,
+    district TEXT,
+    city TEXT,
+    pincode TEXT,
+    address TEXT,
+    education TEXT,
+    remarks TEXT,
+    status TEXT NOT NULL DEFAULT 'New',
+    payload TEXT NOT NULL,
+    submitted_at TEXT NOT NULL,
+    submission_key TEXT
+  );
+`);
+
+await db.exec(
   "CREATE UNIQUE INDEX IF NOT EXISTS partner_applications_submission_key ON partner_applications(submission_key) WHERE submission_key IS NOT NULL",
 );
 
 // ===================== Sign-in (admins, vendors, franchise partners) =====================
-const auth = createAuth(db);
-// The four admins. On the very first start (no admin accounts yet) each gets a random temporary
-// password, printed in the server window and saved to backend/FIRST-ADMIN-PASSWORDS.txt. They must choose
-// their own password at first sign-in. Later: add or reset admins with  node reset-admin-password.js
+const auth = await createAuth(db);
+
 const INITIAL_ADMINS = [
   ["balajinaik5069@gmail.com", "M. Balajinaik"],
   ["koppelagayathri@gmail.com", "Koppela Gayathri"],
   ["admin3@onthewaylogistics.in", "Admin 3"],
   ["admin4@onthewaylogistics.in", "Admin 4"],
 ];
-if (
-  db.prepare("SELECT COUNT(*) AS n FROM accounts WHERE role='admin'").get()
-    .n === 0
-) {
+
+const adminCountRow = await db
+  .prepare("SELECT COUNT(*) AS n FROM accounts WHERE role='admin'")
+  .get();
+
+if (Number(adminCountRow?.n || 0) === 0) {
   const lines = [];
   for (const [email, name] of INITIAL_ADMINS) {
     const password = auth.tempPassword();
@@ -116,7 +166,7 @@ if (
     fs.writeFileSync(path.join(DATA_DIR, "FIRST-ADMIN-PASSWORDS.txt"), text, {
       mode: 0o600,
     });
-  } catch (e) {}
+  } catch {}
   console.log(
     "\n" +
       "=".repeat(78) +
@@ -127,18 +177,18 @@ if (
       "\n",
   );
 }
-// One Super Admin manages the other admins' accounts (SUPER_ADMIN_EMAIL in backend/.env, else the earliest admin).
-auth.ensureSuperAdmin(process.env.SUPER_ADMIN_EMAIL);
-auth.cleanupSessions();
-setInterval(() => auth.cleanupSessions(), 60 * 60 * 1000).unref();
-// Behind an HTTPS proxy/host (Render, Railway, Nginx...) set TRUST_PROXY=true so cookies are marked Secure.
+
+await auth.ensureSuperAdmin(process.env.SUPER_ADMIN_EMAIL);
+await auth.cleanupSessions();
+setInterval(() => auth.cleanupSessions().catch((e) => console.error("Session cleanup:", e.message)), 60 * 60 * 1000).unref();
+
 if (process.env.TRUST_PROXY)
   app.set(
     "trust proxy",
     process.env.TRUST_PROXY === "true"
       ? 1
       : /^\d+$/.test(process.env.TRUST_PROXY)
-        ? Number(process.env.TRUST_PROXY) // number of proxies in front (Vercel + Render = 2)
+        ? Number(process.env.TRUST_PROXY)
         : process.env.TRUST_PROXY,
   );
 
@@ -154,14 +204,14 @@ const TRUSTED_ORIGINS = new Set(
   [
     ORIGIN,
     originOf(process.env.PUBLIC_URL || ""),
+    "https://www.onthewayindia.com",
+    "https://onthewayindia.com",
     "http://localhost:5500",
     "http://127.0.0.1:5500",
     "http://localhost:5501",
     "http://127.0.0.1:5501",
   ].filter(Boolean),
 );
-// Host names this server answers to: localhost, IP addresses (e.g. 192.168.x.x on your network), and the
-// addresses in ALLOWED_ORIGIN / PUBLIC_URL / ALLOWED_HOSTS. Unknown domain names are refused.
 const KNOWN_HOSTS = new Set([
   "localhost",
   ...[...TRUSTED_ORIGINS].map((o) => new URL(o).hostname),
@@ -184,6 +234,7 @@ const isKnownHost = (req) => {
 const isTrustedOrigin = (req, origin) =>
   TRUSTED_ORIGINS.has(origin) ||
   (isKnownHost(req) && origin === `${req.protocol}://${req.get("host")}`);
+
 let warnedHost = false;
 app.use("/api", (req, res, next) => {
   if (isKnownHost(req)) return next();
@@ -193,22 +244,23 @@ app.use("/api", (req, res, next) => {
       `Refused API request for unknown address "${hostnameOf(req)}". If this is your site's address, set PUBLIC_URL (or ALLOWED_HOSTS) in backend/.env.`,
     );
   }
-  res
-    .status(421)
-    .json({
-      error:
-        "This server is not set up for this web address. The site owner must add it to PUBLIC_URL in backend/.env.",
-    });
+  res.status(421).json({
+    error:
+      "This server is not set up for this web address. The site owner must add it to PUBLIC_URL in backend/.env.",
+  });
 });
+
 app.use((req, res, next) => {
   const origin = String(req.headers.origin || "");
   res.setHeader("Vary", "Origin");
   if (origin && isTrustedOrigin(req, origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Access-Control-Allow-Credentials", "true");
-  } else if (origin === "null")
-    res.setHeader("Access-Control-Allow-Origin", "null"); // pages opened from disk may submit the public forms only
-  else res.setHeader("Access-Control-Allow-Origin", ORIGIN);
+  } else if (origin === "null") {
+    res.setHeader("Access-Control-Allow-Origin", "null");
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", ORIGIN);
+  }
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader(
     "Access-Control-Allow-Methods",
@@ -217,7 +269,7 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
-// Signed-in actions must come from this site's own pages (protects the session cookies from other websites).
+
 const PUBLIC_POSTS = new Set([
   "/api/partner-applications",
   "/api/support",
@@ -231,17 +283,13 @@ app.use("/api", (req, res, next) => {
     return next();
   const origin = req.headers.origin;
   if (origin && !isTrustedOrigin(req, origin))
-    return res
-      .status(403)
-      .json({
-        error:
-          "This request was blocked because it did not come from the On The Way Logistics site.",
-      });
+    return res.status(403).json({
+      error:
+        "This request was blocked because it did not come from the On The Way Logistics site.",
+    });
   next();
 });
-// General limit for the API only. Pages, scripts, styles and images are not limited: one page load fetches 20+ files,
-// so a shared office connection would otherwise see a blank page. Sign-in, applications and the support form keep
-// their own stricter limits below.
+
 app.use(
   "/api",
   rateLimit({
@@ -253,10 +301,9 @@ app.use(
   }),
 );
 
-// Admin API access now requires a signed-in admin session (the old X-Admin-Email header is no longer trusted).
 const adminGuard = auth.requireRole("admin");
-function adminEmailOf(req) {
-  const s = auth.getSession(req, "admin");
+async function adminEmailOf(req) {
+  const s = await auth.getSession(req, "admin");
   return s && !s.account.must_change_password
     ? s.account.email || s.account.login_id
     : "";
@@ -298,17 +345,18 @@ function planFor(f) {
       ? process.env.RAZORPAY_PLAN_MONTHLY_ID
       : process.env.RAZORPAY_PLAN_WEEKLY_ID;
 }
-function audit(email, action, details) {
-  db.prepare(
-    "INSERT INTO audit_log(admin_email,action,details,created_at) VALUES(?,?,?,?)",
-  ).run(email, action, JSON.stringify(details || {}), new Date().toISOString());
+async function audit(email, action, details) {
+  await db
+    .prepare(
+      "INSERT INTO audit_log(admin_email,action,details,created_at) VALUES(?,?,?,?)",
+    )
+    .run(email, action, JSON.stringify(details || {}), new Date().toISOString());
 }
 
-// IMPORTANT: raw body is required for webhook HMAC verification.
 app.post(
   "/api/razorpay/webhook",
   express.raw({ type: "application/json" }),
-  (req, res) => {
+  async (req, res) => {
     try {
       const secret = process.env.RAZORPAY_WEBHOOK_SECRET || "";
       const signature = String(req.header("X-Razorpay-Signature") || "");
@@ -336,50 +384,54 @@ app.post(
             : event.event === "payment.failed"
               ? "Failed"
               : "Pending";
-        db.prepare(
-          `INSERT INTO transactions(gateway_payment_id,subscription_id,gateway_subscription_id,transaction_id,amount,status,method,payer_name,payment_date,auto_pay_status,raw_event,created_at) VALUES(@gateway_payment_id,@subscription_id,@gateway_subscription_id,@transaction_id,@amount,@status,@method,@payer_name,@payment_date,@auto_pay_status,@raw_event,@created_at) ON CONFLICT(gateway_payment_id) DO UPDATE SET status=excluded.status,raw_event=excluded.raw_event,payment_date=excluded.payment_date`,
-        ).run({
-          gateway_payment_id: payment.id,
-          subscription_id: null,
-          gateway_subscription_id: payment.subscription_id || null,
-          transaction_id: payment.id,
-          amount: Number(payment.amount || 0) / 100,
-          status,
-          method: payment.method || "Unknown",
-          payer_name: "",
-          payment_date: new Date().toISOString().slice(0, 10),
-          auto_pay_status: payment.subscription_id ? "Active" : "Cancelled",
-          raw_event: JSON.stringify(event),
-          created_at: new Date().toISOString(),
-        });
+        await db
+          .prepare(
+            `INSERT INTO transactions(gateway_payment_id,subscription_id,gateway_subscription_id,transaction_id,amount,status,method,payer_name,payment_date,auto_pay_status,raw_event,created_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(gateway_payment_id) DO UPDATE SET status=EXCLUDED.status,raw_event=EXCLUDED.raw_event,payment_date=EXCLUDED.payment_date`,
+          )
+          .run(
+            payment.id,
+            null,
+            payment.subscription_id || null,
+            payment.id,
+            Number(payment.amount || 0) / 100,
+            status,
+            payment.method || "Unknown",
+            "",
+            new Date().toISOString().slice(0, 10),
+            payment.subscription_id ? "Active" : "Cancelled",
+            JSON.stringify(event),
+            new Date().toISOString(),
+          );
       }
       if (event.event?.startsWith("subscription.")) {
         const sub = entity;
-        db.prepare(
-          "UPDATE subscriptions SET status=?,next_payment_at=? WHERE gateway_subscription_id=?",
-        ).run(
-          String(sub.status || "unknown"),
-          sub.charge_at
-            ? new Date(Number(sub.charge_at) * 1000).toISOString()
-            : null,
-          sub.id,
-        );
+        await db
+          .prepare(
+            "UPDATE subscriptions SET status=?,next_payment_at=? WHERE gateway_subscription_id=?",
+          )
+          .run(
+            String(sub.status || "unknown"),
+            sub.charge_at
+              ? new Date(Number(sub.charge_at) * 1000).toISOString()
+              : null,
+            sub.id,
+          );
       }
       return res.sendStatus(200);
-    } catch (err) {
+    } catch {
       return res.status(500).send("Webhook processing error");
     }
   },
 );
-app.use("/api/portal", express.json({ limit: "1mb" })); // portal data can include a small profile photo
-app.use("/api/admin/payment-import", express.json({ limit: "8mb" })); // a month of payment rows for many riders
-app.use("/api/admin/weekly-payments", express.json({ limit: "12mb" })); // Weekly Payments Excel imports (up to 20,000 rows)
-app.use("/api/admin/hubs", express.json({ limit: "2mb" })); // Hub Management Excel imports (up to 2,000 rows)
+
+app.use("/api/portal", express.json({ limit: "1mb" }));
+app.use("/api/admin/payment-import", express.json({ limit: "8mb" }));
+app.use("/api/admin/weekly-payments", express.json({ limit: "12mb" }));
+app.use("/api/admin/hubs", express.json({ limit: "2mb" }));
 app.use(express.json({ limit: "100kb" }));
 
-// ---------- Sign in / out / change password ----------
-// Failed attempts are counted per person (IP + the ID they typed), so one mistyped password elsewhere - or several
-// people behind one shared address - cannot lock every admin out. A wider per-IP cap still stops guessing across many IDs.
 const loginIdOf = (req) =>
   String(req.body?.loginId || req.body?.email || "")
     .trim()
@@ -407,6 +459,7 @@ const loginIpLimiter = rateLimit({
   },
 });
 const portalOf = (v) => (auth.ROLES.includes(String(v || "")) ? String(v) : "");
+
 app.post("/api/auth/login", loginIpLimiter, loginLimiter, async (req, res) => {
   try {
     const portal = portalOf(req.body?.portal),
@@ -417,15 +470,13 @@ app.post("/api/auth/login", loginIpLimiter, loginLimiter, async (req, res) => {
     if (!portal) return res.status(400).json({ error: "Unknown portal." });
     if (!loginId || !password)
       return res.status(400).json({ error: "Enter your ID and password." });
-    // Several partner accounts may share one email: the password decides which one is meant.
-    const candidates = auth.findCandidates(portal, loginId);
+    const candidates = await auth.findCandidates(portal, loginId);
     let account = null;
     for (const c of candidates)
       if (await auth.verifyPassword(password, c.password_hash)) {
         account = c;
         break;
       }
-    // Run a hash check even for unknown IDs so a wrong ID and a wrong password take the same time.
     if (!candidates.length)
       await auth.verifyPassword(
         password,
@@ -433,30 +484,30 @@ app.post("/api/auth/login", loginIpLimiter, loginLimiter, async (req, res) => {
       );
     if (!account) {
       if (portal === "admin")
-        audit(loginId.toLowerCase(), "sign_in_failed", {
+        await audit(loginId.toLowerCase(), "sign_in_failed", {
           reason: candidates.length ? "wrong_password" : "unknown_account",
         });
       return res.status(401).json({ error: "Incorrect ID or password." });
     }
     if (account.status !== "active") {
       if (portal === "admin")
-        audit(account.email || account.login_id, "sign_in_blocked", {
+        await audit(account.email || account.login_id, "sign_in_blocked", {
           reason: "account_not_active",
         });
-      return res
-        .status(403)
-        .json({
-          error:
-            "This account is not active. Please contact On The Way Logistics.",
-        });
+      return res.status(403).json({
+        error:
+          "This account is not active. Please contact On The Way Logistics.",
+      });
     }
     const ban = auth.banInfo(account);
     if (ban) {
-      audit(account.login_id, "sign_in_blocked", { reason: "banned" });
-      return res.status(403).json({ error: banMessage(ban, account.role), code: "BANNED" });
+      await audit(account.login_id, "sign_in_blocked", { reason: "banned" });
+      return res
+        .status(403)
+        .json({ error: banMessage(ban, account.role), code: "BANNED" });
     }
-    auth.startSession(req, res, account, { remember: !!req.body?.remember });
-    audit(
+    await auth.startSession(req, res, account, { remember: !!req.body?.remember });
+    await audit(
       account.role === "admin" ? account.email : account.login_id,
       "signed_in",
       { portal, loginId: account.login_id },
@@ -469,28 +520,31 @@ app.post("/api/auth/login", loginIpLimiter, loginLimiter, async (req, res) => {
       .json({ error: "Could not sign in right now. Please try again." });
   }
 });
-app.post("/api/auth/logout", (req, res) => {
+
+app.post("/api/auth/logout", async (req, res) => {
   const portal = portalOf(req.body?.portal || req.query.portal);
   if (portal === "admin") {
-    const s = auth.getSession(req, "admin");
-    if (s) audit(s.account.email || s.account.login_id, "signed_out", {});
+    const s = await auth.getSession(req, "admin");
+    if (s) await audit(s.account.email || s.account.login_id, "signed_out", {});
   }
-  if (portal) auth.endSession(req, res, portal);
+  if (portal) await auth.endSession(req, res, portal);
   res.json({ ok: true });
 });
-app.get("/api/auth/me", (req, res) => {
+
+app.get("/api/auth/me", async (req, res) => {
   const portal = portalOf(req.query.portal);
-  const s = portal && auth.getSession(req, portal);
+  const s = portal && (await auth.getSession(req, portal));
   if (!s)
     return res
       .status(401)
       .json({ error: "Not signed in.", code: "NOT_SIGNED_IN" });
   res.json({ ok: true, account: auth.publicAccount(s.account) });
 });
+
 app.post("/api/auth/change-password", loginLimiter, async (req, res) => {
   try {
     const portal = portalOf(req.body?.portal);
-    const s = portal && auth.getSession(req, portal);
+    const s = portal && (await auth.getSession(req, portal));
     if (!s)
       return res
         .status(401)
@@ -498,7 +552,7 @@ app.post("/api/auth/change-password", loginLimiter, async (req, res) => {
     const current = String(req.body?.currentPassword || ""),
       next = String(req.body?.newPassword || "");
     if (!(await auth.verifyPassword(current, s.account.password_hash))) {
-      audit(
+      await audit(
         s.account.role === "admin" ? s.account.email : s.account.login_id,
         "password_change_failed",
         { portal, reason: "wrong_current_password" },
@@ -511,21 +565,20 @@ app.post("/api/auth/change-password", loginLimiter, async (req, res) => {
     if (problem)
       return res.status(400).json({ error: "New password: " + problem });
     if (current === next)
-      return res
-        .status(400)
-        .json({
-          error: "Choose a password that is different from the current one.",
-        });
+      return res.status(400).json({
+        error: "Choose a password that is different from the current one.",
+      });
     await auth.setPassword(s.account.id, next, { mustChange: false });
-    auth.endAllSessions(s.account.id, s.tokenHash); // sign out other devices, keep this one
-    audit(
+    await auth.endAllSessions(s.account.id, s.tokenHash);
+    await audit(
       s.account.role === "admin" ? s.account.email : s.account.login_id,
       "password_changed",
       { portal },
     );
+    const updated = await auth.accountById(s.account.id);
     res.json({
       ok: true,
-      account: auth.publicAccount(auth.accountById(s.account.id)),
+      account: auth.publicAccount(updated),
     });
   } catch (err) {
     console.error("Password change failed:", err.message);
@@ -536,8 +589,6 @@ app.post("/api/auth/change-password", loginLimiter, async (req, res) => {
 });
 
 // ---------- Admin: forgot / reset password by email ----------
-// The reset link goes to the admin's registered email, sent with the same Gmail / SMTP settings as the other emails
-// (backend/.env). Passwords are never emailed or shown; the link lets the admin choose a new one.
 const resetRequestLimiter = rateLimit({
   windowMs: 15 * 60_000,
   max: 10,
@@ -567,14 +618,12 @@ const passwordResets = createPasswordResetService({
         text,
       });
     } catch (err) {
-      mailCheck.at = 0; // check the email settings again on the next request
+      mailCheck.at = 0;
       throw err;
     }
   },
 });
-// Can reset emails be sent? Checked by signing in to the mail server (Gmail or SMTP from backend/.env). The result is
-// kept for 10 minutes (1 minute after a failure), so the sign-in page stays fast. This answer is the same for every
-// email address, so it does not reveal who is an admin.
+
 let mailCheck = { at: 0, ready: false, problem: "", detail: "" };
 async function mailStatus({ fresh = false } = {}) {
   if (gmailApi.configured()) {
@@ -625,8 +674,7 @@ async function mailStatus({ fresh = false } = {}) {
   }
   return mailCheck;
 }
-// When reset emails cannot be sent, a Forgot password request goes to the Super Admin (Settings > Admin Accounts),
-// who can give a temporary password. See admin-password-help.js.
+
 const passwordHelp = createPasswordHelpService({ db, auth, audit });
 app.get("/api/auth/forgot-password/options", async (req, res) => {
   res.set("Cache-Control", "no-store");
@@ -636,7 +684,7 @@ app.get("/api/auth/forgot-password/options", async (req, res) => {
 app.post("/api/auth/forgot-password", resetRequestLimiter, async (req, res) => {
   const mail = await mailStatus();
   if (!mail.ready) {
-    const out = passwordHelp.requestHelp({ email: req.body?.email });
+    const out = await passwordHelp.requestHelp({ email: req.body?.email });
     return res.json({ ok: true, mode: out.mode, message: out.message });
   }
   const host = `${req.protocol}://${req.get("host")}`;
@@ -652,7 +700,7 @@ app.post("/api/auth/forgot-password", resetRequestLimiter, async (req, res) => {
         ". Set PUBLIC_URL in backend/.env to the address admins use on their phones, or the link will not open there.",
     );
   }
-  const out = passwordResets.requestReset({
+  const out = await passwordResets.requestReset({
     email: req.body?.email,
     baseUrl: process.env.PUBLIC_URL || host,
   });
@@ -676,37 +724,34 @@ app.post("/api/auth/reset-password", resetRequestLimiter, async (req, res) => {
 });
 
 // ---------- Super Admin: manage administrator accounts ----------
-// Only the Super Admin can list admins, send them a reset link or switch an account on / off. Everything is checked on
-// the server; hiding the screen in the browser is not what protects it. No password or hash is ever returned.
 const superAdminGuard = (req, res, next) =>
   auth.isSuperAdmin(req.account)
     ? next()
-    : res
-        .status(403)
-        .json({
-          error: "Only the Super Admin can manage administrator accounts.",
-          code: "SUPER_ADMIN_ONLY",
-        });
+    : res.status(403).json({
+        error: "Only the Super Admin can manage administrator accounts.",
+        code: "SUPER_ADMIN_ONLY",
+      });
 const baseUrlOf = (req) =>
   process.env.PUBLIC_URL || `${req.protocol}://${req.get("host")}`;
-const adminsWithHelp = () => {
-  const open = passwordHelp.openRequests();
-  return auth.listAdmins().map((a) => ({
+const adminsWithHelp = async () => {
+  const open = await passwordHelp.openRequests();
+  const admins = await auth.listAdmins();
+  return admins.map((a) => ({
     ...a,
     helpRequestedAt: open.get(a.loginId)?.requestedAt || null,
   }));
 };
+
 app.get("/api/admin/accounts", adminGuard, superAdminGuard, async (req, res) => {
   const mail = await mailStatus({ fresh: req.query.check === "1" });
   res.json({
     ok: true,
-    admins: adminsWithHelp(),
+    admins: await adminsWithHelp(),
     mailReady: mail.ready,
     mailProblem: mail.ready ? "" : mail.detail,
   });
 });
-// The Super Admin adds an admin (temporary password shown once) or changes an admin's name / registered email.
-// The email is also the sign-in ID. Checked on the server; recorded in the audit log.
+
 app.post("/api/admin/accounts", adminGuard, superAdminGuard, async (req, res) => {
   try {
     const out = await auth.addAdmin({
@@ -717,7 +762,7 @@ app.post("/api/admin/accounts", adminGuard, superAdminGuard, async (req, res) =>
       return res
         .status(out.status || 400)
         .json({ error: out.error, field: out.field });
-    audit(req.adminEmail, "admin_account_added", {
+    await audit(req.adminEmail, "admin_account_added", {
       target: out.account.email,
       name: out.account.name,
     });
@@ -728,20 +773,21 @@ app.post("/api/admin/accounts", adminGuard, superAdminGuard, async (req, res) =>
       loginId: out.account.login_id,
       email: out.account.email,
       name: out.account.name,
-      admins: adminsWithHelp(),
+      admins: await adminsWithHelp(),
     });
   } catch (err) {
     console.error("Add admin failed:", err.message);
     res.status(500).json({ error: "Could not add the admin. Please try again." });
   }
 });
+
 app.patch(
   "/api/admin/accounts/:loginId",
   adminGuard,
   superAdminGuard,
-  (req, res) => {
+  async (req, res) => {
     try {
-      const out = auth.updateAdminDetails(req.params.loginId, {
+      const out = await auth.updateAdminDetails(req.params.loginId, {
         name: req.body?.name,
         email: req.body?.email,
       });
@@ -750,7 +796,7 @@ app.patch(
           .status(out.status || 400)
           .json({ error: out.error, field: out.field });
       if (out.changes.length)
-        audit(req.adminEmail, "admin_account_updated", {
+        await audit(req.adminEmail, "admin_account_updated", {
           target: out.account.email,
           changes: out.changes,
           ...(out.changes.includes("email") ? { previousEmail: out.previousEmail } : {}),
@@ -759,7 +805,7 @@ app.patch(
         ok: true,
         changes: out.changes,
         account: auth.publicAccount(out.account),
-        admins: adminsWithHelp(),
+        admins: await adminsWithHelp(),
       });
     } catch (err) {
       console.error("Edit admin failed:", err.message);
@@ -767,8 +813,7 @@ app.patch(
     }
   },
 );
-// The Super Admin gives another admin a temporary password (shown once). The admin must choose their own password
-// at the next sign-in. Works without email, for example after a Forgot password request.
+
 app.post(
   "/api/admin/accounts/:loginId/temporary-password",
   adminGuard,
@@ -789,7 +834,7 @@ app.post(
         loginId: out.loginId,
         email: out.email,
         name: out.name,
-        admins: adminsWithHelp(),
+        admins: await adminsWithHelp(),
       });
     } catch (err) {
       console.error("Temporary password failed:", err.message);
@@ -799,6 +844,7 @@ app.post(
     }
   },
 );
+
 app.post(
   "/api/admin/accounts/:loginId/send-reset",
   adminGuard,
@@ -806,7 +852,7 @@ app.post(
   resetRequestLimiter,
   async (req, res) => {
     try {
-      const target = auth.adminByLoginId(req.params.loginId);
+      const target = await auth.adminByLoginId(req.params.loginId);
       if (!target)
         return res
           .status(404)
@@ -835,23 +881,24 @@ app.post(
     }
   },
 );
+
 app.post(
   "/api/admin/accounts/:loginId/status",
   adminGuard,
   superAdminGuard,
-  (req, res) => {
+  async (req, res) => {
     const status = String(req.body?.status || "");
-    const out = auth.setAdminStatus(req.params.loginId, status, req.account.id);
+    const out = await auth.setAdminStatus(req.params.loginId, status, req.account.id);
     if (!out.ok)
       return res.status(out.status || 400).json({ error: out.error });
-    audit(
+    await audit(
       req.adminEmail,
       status === "disabled"
         ? "admin_account_disabled"
         : "admin_account_enabled",
       { target: out.account.email || out.account.login_id },
     );
-    res.json({ ok: true, admins: adminsWithHelp() });
+    res.json({ ok: true, admins: await adminsWithHelp() });
   },
 );
 
@@ -865,6 +912,7 @@ import {
   isValidYears,
   categoryForYears,
 } from "./partner-application.js";
+
 const PARTNER_STATUSES = [
   "New",
   "Contacted",
@@ -874,25 +922,22 @@ const PARTNER_STATUSES = [
   "Rejected",
 ];
 const PARTNER_DECISIONS = ["Accepted", "Rejected"];
-// Older versions called "Accepted" "Approved"; treat both the same.
 function normalizeStatus(v) {
   const s = String(v ?? "").trim();
   return s === "Approved" ? "Accepted" : s;
 }
-// One-time upgrade of records saved with the old "Approved" status.
-for (const r of db
-  .prepare(
-    "SELECT id,payload FROM partner_applications WHERE status='Approved'",
-  )
-  .all()) {
+
+const legacyApprovedRows = await db
+  .prepare("SELECT id,payload FROM partner_applications WHERE status='Approved'")
+  .all();
+for (const r of legacyApprovedRows) {
   const p = JSON.parse(r.payload);
   p.status = "Accepted";
-  db.prepare(
-    "UPDATE partner_applications SET status=?,payload=? WHERE id=?",
-  ).run("Accepted", JSON.stringify(p), r.id);
+  await db
+    .prepare("UPDATE partner_applications SET status=?,payload=? WHERE id=?")
+    .run("Accepted", JSON.stringify(p), r.id);
 }
-// Fields an application may contain (website form + admin "New application"). Anything else is ignored.
-// Application field rules (allowed fields, validation, record mapping) live in partner-application.js.
+
 const PARTNER_EDITABLE = [
   "name",
   "contact",
@@ -916,7 +961,6 @@ const PARTNER_EDITABLE = [
   "locationArea",
   "yearsOfExperience",
 ];
-// Admin edits also update the applicant's own field names, so the View form and the table always agree.
 const PARTNER_ALIAS = {
   name: "fullName",
   mobile: "contactNumber",
@@ -928,29 +972,33 @@ const PARTNER_ALIAS = {
 function partnerPrefix(type) {
   return String(type || "").toLowerCase() === "vendor" ? "VN" : "FP";
 }
-// Application IDs count up per type: VN-000001, VN-000002 ... for vendors and FP-000001, FP-000002 ... for
-// franchises. Every ID is given out only once: the counter is stored and never goes back (an ID freed by a
-// type change is not reused), and any number that is already taken is skipped.
-db.exec(
+
+await db.exec(
   "CREATE TABLE IF NOT EXISTS id_counters(prefix TEXT PRIMARY KEY,last INTEGER NOT NULL)",
 );
-const nextApplicationId = db.transaction((type) => {
-  const prefix = partnerPrefix(type),
-    taken = db.prepare("SELECT 1 FROM partner_applications WHERE app_id=?");
-  let n =
-      db.prepare("SELECT last FROM id_counters WHERE prefix=?").get(prefix)
-        ?.last || 0,
-    id;
-  do {
-    n++;
-    id = `${prefix}-${String(n).padStart(6, "0")}`;
-  } while (taken.get(id) || auth.accountByLogin(id));
-  db.prepare(
-    "INSERT INTO id_counters(prefix,last) VALUES(?,?) ON CONFLICT(prefix) DO UPDATE SET last=excluded.last",
-  ).run(prefix, n);
-  return id;
-});
-// ---------- Partner portal logins ----------
+
+async function nextApplicationId(type) {
+  return db.transaction(async (tx) => {
+    const prefix = partnerPrefix(type);
+    const taken = tx.prepare("SELECT 1 FROM partner_applications WHERE app_id=?");
+    const counterRow = await tx
+      .prepare("SELECT last FROM id_counters WHERE prefix=?")
+      .get(prefix);
+    let n = Number(counterRow?.last || 0);
+    let id;
+    do {
+      n++;
+      id = `${prefix}-${String(n).padStart(6, "0")}`;
+    } while ((await taken.get(id)) || (await auth.accountByLogin(id)));
+    await tx
+      .prepare(
+        "INSERT INTO id_counters(prefix,last) VALUES(?,?) ON CONFLICT(prefix) DO UPDATE SET last=EXCLUDED.last",
+      )
+      .run(prefix, n);
+    return id;
+  })();
+}
+
 const portalPathFor = (app) =>
   String(app.type).toLowerCase() === "vendor" ? "/vendor/" : "/franchise/";
 const publicBase = (req) =>
@@ -958,10 +1006,8 @@ const publicBase = (req) =>
     /\/+$/,
     "",
   );
-// ---------- Emails to applicants (partner-emails.js has the wording) ----------
-// Sent when a website application is submitted, approved or rejected, and when an admin issues a new partner password.
-// Never throws: the result {sent, to, reason} is shown to the admin and kept in the application's email history.
 const EMAIL_OK = /^[^\s@<>()",;:]+@[^\s@<>()",;:]+\.[^\s@<>()",;:]+$/;
+
 async function emailApplicant(app, message) {
   const to = String(app.email || "").trim();
   if (!EMAIL_OK.test(to))
@@ -999,11 +1045,11 @@ async function emailApplicant(app, message) {
     return { sent: true, to, reason: "" };
   } catch (e) {
     console.error("Applicant email failed:", e.message);
-    mailCheck.at = 0; // check the email settings again next time
+    mailCheck.at = 0;
     return { sent: false, to, reason: "The email could not be sent. Share the details another way." };
   }
 }
-// Tries again after a failed send. "Not set up" and "no valid address" are not retried: waiting cannot fix them.
+
 const RETRY_DELAYS_MS = process.env.NODE_ENV === "test" ? [10, 10] : [10_000, 60_000];
 async function sendWithRetry(send) {
   let result = await send();
@@ -1014,9 +1060,11 @@ async function sendWithRetry(send) {
   }
   return result;
 }
-// Adds one entry to the application's email history (kept in its saved record, newest 20). Returns the record.
-function recordApplicantEmail(id, kind, result, actor = "") {
-  const row = db.prepare("SELECT payload FROM partner_applications WHERE id=?").get(id);
+
+async function recordApplicantEmail(id, kind, result, actor = "") {
+  const row = await db
+    .prepare("SELECT payload FROM partner_applications WHERE id=?")
+    .get(id);
   if (!row) return null;
   const p = JSON.parse(row.payload);
   p.emailLog = [
@@ -1029,13 +1077,16 @@ function recordApplicantEmail(id, kind, result, actor = "") {
       reason: result.sent ? "" : result.reason || "",
     },
   ].slice(-20);
-  db.prepare("UPDATE partner_applications SET payload=? WHERE id=?").run(JSON.stringify(p), id);
-  audit(actor || p.email || "", "applicant_email_" + kind, {
+  await db
+    .prepare("UPDATE partner_applications SET payload=? WHERE id=?")
+    .run(JSON.stringify(p), id);
+  await audit(actor || p.email || "", "applicant_email_" + kind, {
     appId: p.appId,
     sent: !!result.sent,
   });
   return p;
 }
+
 let warnedLocalPortalLink = false;
 const loginFor = (req, app, loginId, password = "") => {
   const portalUrl = publicBase(req) + portalPathFor(app);
@@ -1052,7 +1103,7 @@ const loginFor = (req, app, loginId, password = "") => {
   return { portalUrl, loginId, password };
 };
 const NOT_NOTIFIED = { sent: false, to: "", reason: "you chose not to email the applicant." };
-// What the admin sees once, right after a login is created or its password is reset.
+
 function credentialsFor(req, app, login, email) {
   return {
     loginId: login.loginId,
@@ -1067,7 +1118,7 @@ function credentialsFor(req, app, login, email) {
     email,
   };
 }
-// Approve / reject emails for a decision. Returns {email, credentials, loginReenabled, application}.
+
 async function decisionFollowUp(req, app, decision, { note = "", notify = true } = {}) {
   let email = null,
     credentials = null,
@@ -1081,20 +1132,24 @@ async function decisionFollowUp(req, app, decision, { note = "", notify = true }
     if (r.password) credentials = credentialsFor(req, app, login, email);
     else loginReenabled = true;
   } else if (decision === "Rejected") {
-    auth.disablePartnerAccount(app.id);
+    await auth.disablePartnerAccount(app.id);
     email = notify
       ? await emailApplicant(app, rejectedEmail(app, { note, supportEmail: SUPPORT_EMAIL }))
       : NOT_NOTIFIED;
   }
   const saved = email
-    ? recordApplicantEmail(app.id, decision === "Accepted" ? "approved" : "rejected", email, req.adminEmail) || app
+    ? (await recordApplicantEmail(app.id, decision === "Accepted" ? "approved" : "rejected", email, req.adminEmail)) || app
     : app;
   return { email, credentials, loginReenabled, application: saved };
 }
-const withLogin = (app) => ({
-  ...app,
-  portalLogin: auth.publicAccount(auth.accountForApplication(app.id)),
-});
+
+async function withLogin(app) {
+  return {
+    ...app,
+    portalLogin: auth.publicAccount(await auth.accountForApplication(app.id)),
+  };
+}
+
 const applicationLimiter = rateLimit({
   windowMs: 60 * 60_000,
   max: 20,
@@ -1119,8 +1174,7 @@ function sniffPartnerFile(buffer) {
   if (buffer.length > 5 && buffer.subarray(0, 5).toString("latin1") === "%PDF-") return "application/pdf";
   return "";
 }
-// Applicant identity documents are encrypted at rest with AES-256-GCM. The key is kept
-// outside the public website; deployments should preserve backend/uploads and back it up securely.
+
 const partnerDocumentKeyPath = path.join(UPLOAD_DIR, ".partner-document-key");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true, mode: 0o700 });
 let partnerDocumentKey;
@@ -1145,150 +1199,165 @@ function decryptPartnerDocument(stored) {
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(body), decipher.final()]);
 }
-app.post("/api/partner-applications", applicationLimiter, (req, res, next) => partnerApplicationUpload(req, res, (err) => {
-  if (err) return res.status(400).json({ error: err.code === "LIMIT_FILE_SIZE" ? "Each document must be 5 MB or smaller." : err.message || "Invalid document upload." });
-  next();
-}), (req, res) => {
-  const storedPaths = [];
-  try {
-    const input = cleanInput(req.body);
-    const type = typeOf(input.type || input.portalType);
-    // Entries made in the dashboard are sent as JSON; the public forms always send multipart form data. An admin
-    // who is signed in and tests the public form therefore still gets the visitor rules and the notification.
-    const createdBy = req.is("application/json") ? adminEmailOf(req) : "";
-    const submissionKey = String(req.body?.submissionKey || "").trim();
-    if (submissionKey && !/^[A-Za-z0-9-]{16,80}$/.test(submissionKey))
-      return res.status(400).json({ error: "Invalid submission key." });
-    if (submissionKey) {
-      const existing = findApplicationByKey(submissionKey);
-      if (existing) return res.status(200).json({ ok: true, duplicate: true, application: existing });
-    }
-    // Website visitors must complete the required fields; entries made in the admin panel keep the looser rule.
-    if (createdBy && !isValidYears(input.yearsOfExperience))
-      return res.status(400).json({ error: "Years of Experience must be a whole number from 0 to 10." });
-    if (!createdBy) {
-      // The Applicant Category is always derived from Years of Experience (0 = Fresher, 1 to 10 = Experienced),
-      // so the saved category can never disagree with the years the applicant entered.
-      input.applicantCategory = categoryForYears(input.yearsOfExperience);
-      const errors = validatePublicApplication(input, type);
-      if (errors.length)
-        return res.status(400).json({ error: errors.join(" "), errors });
-      const category = String(input.applicantCategory || "");
-      if (!["Fresher", "Experienced"].includes(category)) return res.status(400).json({ error: "Please select Fresher or Experienced." });
-      const aadhaar = req.files?.aadhaarCard?.[0];
-      if (!aadhaar) return res.status(400).json({ error: "Please upload your Aadhaar Card." });
-      if (category === "Experienced") {
-        const months = Number(input.salarySlipMonths);
-        const slips = req.files?.salarySlips || [];
-        if (![3, 6].includes(months)) return res.status(400).json({ error: "Select 3-month or 6-month salary slips." });
-        if (slips.length !== months) return res.status(400).json({ error: `Upload exactly ${months} salary slip files.` });
+
+app.post(
+  "/api/partner-applications",
+  applicationLimiter,
+  (req, res, next) =>
+    partnerApplicationUpload(req, res, (err) => {
+      if (err)
+        return res.status(400).json({
+          error:
+            err.code === "LIMIT_FILE_SIZE"
+              ? "Each document must be 5 MB or smaller."
+              : err.message || "Invalid document upload.",
+        });
+      next();
+    }),
+  async (req, res) => {
+    const storedPaths = [];
+    try {
+      const input = cleanInput(req.body);
+      const type = typeOf(input.type || input.portalType);
+      const createdBy = req.is("application/json") ? await adminEmailOf(req) : "";
+      const submissionKey = String(req.body?.submissionKey || "").trim();
+      if (submissionKey && !/^[A-Za-z0-9-]{16,80}$/.test(submissionKey))
+        return res.status(400).json({ error: "Invalid submission key." });
+      if (submissionKey) {
+        const existing = await findApplicationByKey(submissionKey);
+        if (existing) return res.status(200).json({ ok: true, duplicate: true, application: existing });
       }
-    }
-    const fields = recordFields(input, type);
-    if (!fields.name)
-      return res.status(400).json({ error: "Applicant name is required" });
-    const appId = nextApplicationId(type),
-      id = crypto.randomUUID(),
-      submittedAt = new Date().toISOString();
-    const documents = [];
-    if (!createdBy) {
-      const aadhaar = req.files?.aadhaarCard?.[0];
-      const salarySlips = req.files?.salarySlips || [];
-      const incoming = [...(aadhaar ? [{ file: aadhaar, kind: "Aadhaar Card" }] : []), ...salarySlips.map((file, index) => ({ file, kind: `Salary Slip ${index + 1}` }))];
-      for (const item of incoming) {
-        const mime = sniffPartnerFile(item.file.buffer);
-        if (!mime) {
-          for (const saved of storedPaths) try { fs.unlinkSync(saved); } catch {}
-          return res.status(400).json({ error: "Documents must be valid PDF, JPG or PNG files." });
+      if (createdBy && !isValidYears(input.yearsOfExperience))
+        return res.status(400).json({ error: "Years of Experience must be a whole number from 0 to 10." });
+      if (!createdBy) {
+        input.applicantCategory = categoryForYears(input.yearsOfExperience);
+        const errors = validatePublicApplication(input, type);
+        if (errors.length)
+          return res.status(400).json({ error: errors.join(" "), errors });
+        const category = String(input.applicantCategory || "");
+        if (!["Fresher", "Experienced"].includes(category))
+          return res.status(400).json({ error: "Please select Fresher or Experienced." });
+        const aadhaar = req.files?.aadhaarCard?.[0];
+        if (!aadhaar) return res.status(400).json({ error: "Please upload your Aadhaar Card." });
+        if (category === "Experienced") {
+          const months = Number(input.salarySlipMonths);
+          const slips = req.files?.salarySlips || [];
+          if (![3, 6].includes(months)) return res.status(400).json({ error: "Select 3-month or 6-month salary slips." });
+          if (slips.length !== months) return res.status(400).json({ error: `Upload exactly ${months} salary slip files.` });
         }
       }
-      const docDir = path.join(UPLOAD_DIR, "partner-applications", id);
-      fs.mkdirSync(docDir, { recursive: true, mode: 0o700 });
-      for (const item of incoming) {
-        const mime = sniffPartnerFile(item.file.buffer);
-        const docId = crypto.randomUUID();
-        const storedName = docId + ".enc";
-        const target = path.join(docDir, storedName);
-        fs.writeFileSync(target, encryptPartnerDocument(item.file.buffer), { flag: "wx", mode: 0o600 });
-        storedPaths.push(target);
-        documents.push({ id: docId, type: item.kind, name: path.basename(item.file.originalname || item.kind).slice(0, 120), mime, size: item.file.size, storedName });
+      const fields = recordFields(input, type);
+      if (!fields.name)
+        return res.status(400).json({ error: "Applicant name is required" });
+      const appId = await nextApplicationId(type),
+        id = crypto.randomUUID(),
+        submittedAt = new Date().toISOString();
+      const documents = [];
+      if (!createdBy) {
+        const aadhaar = req.files?.aadhaarCard?.[0];
+        const salarySlips = req.files?.salarySlips || [];
+        const incoming = [...(aadhaar ? [{ file: aadhaar, kind: "Aadhaar Card" }] : []), ...salarySlips.map((file, index) => ({ file, kind: `Salary Slip ${index + 1}` }))];
+        for (const item of incoming) {
+          const mime = sniffPartnerFile(item.file.buffer);
+          if (!mime) {
+            for (const saved of storedPaths) try { fs.unlinkSync(saved); } catch {}
+            return res.status(400).json({ error: "Documents must be valid PDF, JPG or PNG files." });
+          }
+        }
+        const docDir = path.join(UPLOAD_DIR, "partner-applications", id);
+        fs.mkdirSync(docDir, { recursive: true, mode: 0o700 });
+        for (const item of incoming) {
+          const mime = sniffPartnerFile(item.file.buffer);
+          const docId = crypto.randomUUID();
+          const storedName = docId + ".enc";
+          const target = path.join(docDir, storedName);
+          fs.writeFileSync(target, encryptPartnerDocument(item.file.buffer), { flag: "wx", mode: 0o600 });
+          storedPaths.push(target);
+          documents.push({ id: docId, type: item.kind, name: path.basename(item.file.originalname || item.kind).slice(0, 120), mime, size: item.file.size, storedName });
+        }
       }
-    }
-    const status =
-      createdBy && PARTNER_STATUSES.includes(normalizeStatus(input.status))
-        ? normalizeStatus(input.status)
-        : "New";
-    const payload = {
-      ...input,
-      type,
-      ...fields,
-      documents,
-      id,
-      appId,
-      status,
-      submittedAt,
-      source: createdBy ? "Admin panel" : "Website",
-    };
-    if (createdBy) payload.createdBy = createdBy;
-    let adminNote = null;
-    db.transaction(() => {
-      db.prepare(
-        `INSERT INTO partner_applications(id,app_id,type,name,contact,mobile,whatsapp,email,state,district,city,pincode,address,education,remarks,status,payload,submitted_at,submission_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      ).run(
+      const status =
+        createdBy && PARTNER_STATUSES.includes(normalizeStatus(input.status))
+          ? normalizeStatus(input.status)
+          : "New";
+      const payload = {
+        ...input,
+        type,
+        ...fields,
+        documents,
         id,
         appId,
-        type,
-        payload.name,
-        payload.contact,
-        payload.mobile,
-        payload.whatsapp,
-        payload.email,
-        payload.state,
-        payload.district,
-        payload.city,
-        payload.pincode,
-        payload.address,
-        payload.education,
-        payload.remarks,
         status,
-        JSON.stringify(payload),
         submittedAt,
-        createdBy ? null : submissionKey || null,
-      );
-      // Website submissions only: the admin is notified about applications the public sends in.
-      if (!createdBy) adminNote = adminNotifications.create({ applicationId: id, dashboardBase: publicBase(req) });
-    })();
-    if (createdBy)
-      audit(createdBy, "partner_application_created", { appId, type });
-    const willEmail =
-      !createdBy &&
-      EMAIL_OK.test(String(payload.email || "").trim()) &&
-      (gmailApi.configured() || (!!getMailTransporter() && mailCheck.ready === true));
-    const responseApplication = { ...payload, documents: documents.map(({ storedName, ...doc }) => doc) };
-    res.status(201).json({ ok: true, application: responseApplication, confirmationEmail: willEmail });
-    if (adminNote?.created) {
-      broadcastAdminNotification({ id: adminNote.id, applicationId: id, appId, type, name: payload.name });
-      adminNotifications.sendEmail(adminNote.id, { actor: "system" }).catch((e) => console.error("Admin email:", e.message));
+        source: createdBy ? "Admin panel" : "Website",
+      };
+      if (createdBy) payload.createdBy = createdBy;
+      let adminNote = null;
+      await db.transaction(async (tx) => {
+        await tx
+          .prepare(
+            `INSERT INTO partner_applications(id,app_id,type,name,contact,mobile,whatsapp,email,state,district,city,pincode,address,education,remarks,status,payload,submitted_at,submission_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          )
+          .run(
+            id,
+            appId,
+            type,
+            payload.name,
+            payload.contact,
+            payload.mobile,
+            payload.whatsapp,
+            payload.email,
+            payload.state,
+            payload.district,
+            payload.city,
+            payload.pincode,
+            payload.address,
+            payload.education,
+            payload.remarks,
+            status,
+            JSON.stringify(payload),
+            submittedAt,
+            createdBy ? null : submissionKey || null,
+          );
+        if (!createdBy)
+          adminNote = await adminNotifications.create({
+            applicationId: id,
+            dashboardBase: publicBase(req),
+          });
+      })();
+      if (createdBy)
+        await audit(createdBy, "partner_application_created", { appId, type });
+      const willEmail =
+        !createdBy &&
+        EMAIL_OK.test(String(payload.email || "").trim()) &&
+        (gmailApi.configured() || (!!getMailTransporter() && mailCheck.ready === true));
+      const responseApplication = { ...payload, documents: documents.map(({ storedName, ...doc }) => doc) };
+      res.status(201).json({ ok: true, application: responseApplication, confirmationEmail: willEmail });
+      if (adminNote?.created) {
+        broadcastAdminNotification({ id: adminNote.id, applicationId: id, appId, type, name: payload.name });
+        adminNotifications.sendEmail(adminNote.id, { actor: "system" }).catch((e) => console.error("Admin email:", e.message));
+      }
+      if (!createdBy)
+        sendWithRetry(() => emailApplicant(payload, submittedEmail(payload, { supportEmail: SUPPORT_EMAIL })))
+          .then((r) => recordApplicantEmail(id, "submitted", r))
+          .catch((e) => console.error("Submission email:", e.message));
+    } catch (err) {
+      for (const saved of storedPaths) try { fs.unlinkSync(saved); } catch {}
+      const key = String(req.body?.submissionKey || "").trim();
+      const dup = key ? await findApplicationByKey(key) : null;
+      if (key && /unique/i.test(String(err?.message || "")) && dup)
+        return res.status(200).json({ ok: true, duplicate: true, application: dup });
+      console.error("Partner application save:", err);
+      res.status(500).json({ error: "Could not save application" });
     }
-    // "Application submitted" email to the applicant, sent after the answer so the website never waits for it.
-    // A temporary mail-server hiccup must not lose the applicant's confirmation: up to 3 tries (now, +10 s, +60 s).
-    if (!createdBy)
-      sendWithRetry(() => emailApplicant(payload, submittedEmail(payload, { supportEmail: SUPPORT_EMAIL })))
-        .then((r) => recordApplicantEmail(id, "submitted", r))
-        .catch((e) => console.error("Submission email:", e.message));
-  } catch (err) {
-    for (const saved of storedPaths) try { fs.unlinkSync(saved); } catch {}
-    const key = String(req.body?.submissionKey || "").trim();
-    if (key && /UNIQUE/.test(String(err?.message || "")) && findApplicationByKey(key))
-      return res.status(200).json({ ok: true, duplicate: true, application: findApplicationByKey(key) });
-    console.error("Partner application save:", err);
-    res.status(500).json({ error: "Could not save application" });
-  }
-});
-// Admin-only document download. Files live outside every public/static directory.
-app.get("/api/partner-applications/:id/documents/:docId", adminGuard, (req, res) => {
+  },
+);
+
+app.get("/api/partner-applications/:id/documents/:docId", adminGuard, async (req, res) => {
   try {
-    const row = db.prepare("SELECT payload FROM partner_applications WHERE id=?").get(String(req.params.id));
+    const row = await db
+      .prepare("SELECT payload FROM partner_applications WHERE id=?")
+      .get(String(req.params.id));
     if (!row) return res.status(404).json({ error: "Application not found." });
     const appRecord = JSON.parse(row.payload);
     const doc = (appRecord.documents || []).find((d) => d.id === req.params.docId);
@@ -1296,18 +1365,19 @@ app.get("/api/partner-applications/:id/documents/:docId", adminGuard, (req, res)
     const filePath = path.join(UPLOAD_DIR, "partner-applications", String(req.params.id), doc.storedName);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: "Stored document is missing." });
     const plaintext = decryptPartnerDocument(fs.readFileSync(filePath));
-    audit(adminEmailOf(req), "partner_document_downloaded", { appId: appRecord.appId, documentType: doc.type });
+    await audit(await adminEmailOf(req), "partner_document_downloaded", { appId: appRecord.appId, documentType: doc.type });
     res.setHeader("Content-Type", doc.mime);
     res.setHeader("Content-Disposition", `attachment; filename="${String(doc.name || "document").replace(/[\\"\r\n]/g, "_")}"`);
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.send(plaintext);
-  } catch (err) { res.status(500).json({ error: "Could not retrieve document." }); }
+  } catch {
+    res.status(500).json({ error: "Could not retrieve document." });
+  }
 });
-// Admin edits (status, contact details...) are saved on the server so every admin sees them
-// and the next refresh does not undo them. The applicant's original form answers are kept.
+
 app.patch("/api/partner-applications/:id", adminGuard, async (req, res) => {
   try {
-    const row = db
+    const row = await db
       .prepare("SELECT payload FROM partner_applications WHERE id=?")
       .get(String(req.params.id));
     if (!row) return res.status(404).json({ error: "Application not found" });
@@ -1365,37 +1435,37 @@ app.patch("/api/partner-applications/:id", adminGuard, async (req, res) => {
         String(input.type).toLowerCase() === "vendor" ? "Vendor" : "Franchise";
       if (t !== current.type) {
         next.type = t;
-        next.appId = nextApplicationId(t);
+        next.appId = await nextApplicationId(t);
         next.previousAppId = current.appId;
       }
     }
-    db.prepare(
-      "UPDATE partner_applications SET app_id=?,type=?,name=?,contact=?,mobile=?,whatsapp=?,email=?,state=?,district=?,city=?,pincode=?,address=?,education=?,remarks=?,status=?,payload=? WHERE id=?",
-    ).run(
-      next.appId,
-      next.type,
-      next.name,
-      next.contact || "",
-      next.mobile || "",
-      next.whatsapp || "",
-      next.email || "",
-      next.state || "",
-      next.district || "",
-      next.city || "",
-      next.pincode || "",
-      next.address || "",
-      next.education || "",
-      next.remarks || "",
-      next.status || "New",
-      JSON.stringify(next),
-      current.id,
-    );
-    audit(req.adminEmail, "partner_application_updated", {
+    await db
+      .prepare(
+        "UPDATE partner_applications SET app_id=?,type=?,name=?,contact=?,mobile=?,whatsapp=?,email=?,state=?,district=?,city=?,pincode=?,address=?,education=?,remarks=?,status=?,payload=? WHERE id=?",
+      )
+      .run(
+        next.appId,
+        next.type,
+        next.name,
+        next.contact || "",
+        next.mobile || "",
+        next.whatsapp || "",
+        next.email || "",
+        next.state || "",
+        next.district || "",
+        next.city || "",
+        next.pincode || "",
+        next.address || "",
+        next.education || "",
+        next.remarks || "",
+        next.status || "New",
+        JSON.stringify(next),
+        current.id,
+      );
+    await audit(req.adminEmail, "partner_application_updated", {
       appId: next.appId,
       changes: Object.keys(changes),
     });
-    // Accepting through Edit creates the portal login too; moving away from Accepted switches it off.
-    // A change to Accepted or Rejected emails the applicant, as the Approve / Reject buttons do.
     let credentials = null,
       applicantEmail = null,
       saved = next;
@@ -1411,23 +1481,24 @@ app.patch("/api/partner-applications/:id", adminGuard, async (req, res) => {
         const login = loginFor(req, next, r.account.login_id, r.password);
         applicantEmail = await emailApplicant(next, approvedEmail(next, { login, supportEmail: SUPPORT_EMAIL }));
         credentials = credentialsFor(req, next, login, applicantEmail);
-        saved = recordApplicantEmail(next.id, "approved", applicantEmail, req.adminEmail) || next;
+        saved = (await recordApplicantEmail(next.id, "approved", applicantEmail, req.adminEmail)) || next;
       }
     } else if (next.status === "Rejected" && statusChanged) {
       const out = await decisionFollowUp(req, next, "Rejected", { notify: input.notify !== false });
       applicantEmail = out.email;
       saved = out.application;
-    } else if (current.status === "Accepted")
-      auth.disablePartnerAccount(next.id);
-    else auth.syncPartnerAccount(next);
-    res.json({ ok: true, application: withLogin(saved), credentials, applicantEmail });
+    } else if (current.status === "Accepted") {
+      await auth.disablePartnerAccount(next.id);
+    } else {
+      await auth.syncPartnerAccount(next);
+    }
+    res.json({ ok: true, application: await withLogin(saved), credentials, applicantEmail });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Could not update application" });
   }
 });
-// Accept / Reject an application. Records the decision, an optional note, which admin decided and when.
-// decision "Pending" undoes a decision (back to "Under Review").
+
 app.post(
   "/api/partner-applications/:id/decision",
   adminGuard,
@@ -1438,7 +1509,7 @@ app.post(
         return res
           .status(400)
           .json({ error: "Decision must be Accepted, Rejected or Pending" });
-      const row = db
+      const row = await db
         .prepare("SELECT payload FROM partner_applications WHERE id=?")
         .get(String(req.params.id));
       if (!row) return res.status(404).json({ error: "Application not found" });
@@ -1458,18 +1529,15 @@ app.post(
           .trim()
           .slice(0, 1000);
       }
-      db.prepare(
-        "UPDATE partner_applications SET status=?,payload=? WHERE id=?",
-      ).run(next.status, JSON.stringify(next), current.id);
-      audit(
+      await db
+        .prepare("UPDATE partner_applications SET status=?,payload=? WHERE id=?")
+        .run(next.status, JSON.stringify(next), current.id);
+      await audit(
         req.adminEmail,
         "partner_application_" +
           (decision === "Pending" ? "decision_undone" : decision.toLowerCase()),
         { appId: next.appId, note: next.decisionNote || "" },
       );
-      // Accepted -> the applicant gets a portal login (new ones get a temporary password, shown once) and an
-      // "approved" email. Rejected -> their login is switched off and they get a "rejected" email. The admin can
-      // choose not to email ({notify:false}). Undo -> the login is switched off; no email.
       let credentials = null,
         loginReenabled = false,
         applicantEmail = null,
@@ -1482,10 +1550,12 @@ app.post(
         ({ credentials, loginReenabled } = out);
         applicantEmail = out.email;
         saved = out.application;
-      } else auth.disablePartnerAccount(next.id);
+      } else {
+        await auth.disablePartnerAccount(next.id);
+      }
       res.json({
         ok: true,
-        application: withLogin(saved),
+        application: await withLogin(saved),
         credentials,
         loginReenabled,
         applicantEmail,
@@ -1496,7 +1566,7 @@ app.post(
     }
   },
 );
-// ---------- Ban / unban a partner's portal login (the application status does not change) ----------
+
 const banTime = (iso) =>
   new Date(iso).toLocaleString("en-IN", {
     timeZone: "Asia/Kolkata",
@@ -1506,7 +1576,6 @@ const banTime = (iso) =>
     hour: "2-digit",
     minute: "2-digit",
   });
-// What a banned partner sees when they try to sign in.
 function banMessage(ban, role) {
   const portal = role === "vendor" ? "Vendor Portal" : "Franchise Portal";
   return (
@@ -1515,77 +1584,81 @@ function banMessage(ban, role) {
     " Please contact On The Way Logistics."
   ).replace(/\.\./g, ".");
 }
-function recordBan(id, entry) {
-  const row = db.prepare("SELECT payload FROM partner_applications WHERE id=?").get(id);
+async function recordBan(id, entry) {
+  const row = await db
+    .prepare("SELECT payload FROM partner_applications WHERE id=?")
+    .get(id);
   if (!row) return null;
   const p = JSON.parse(row.payload);
   p.banLog = [...(Array.isArray(p.banLog) ? p.banLog : []), { ...entry, at: new Date().toISOString() }].slice(-50);
-  db.prepare("UPDATE partner_applications SET payload=? WHERE id=?").run(JSON.stringify(p), id);
+  await db
+    .prepare("UPDATE partner_applications SET payload=? WHERE id=?")
+    .run(JSON.stringify(p), id);
   return p;
 }
-app.post("/api/partner-applications/:id/ban", adminGuard, (req, res) => {
+
+app.post("/api/partner-applications/:id/ban", adminGuard, async (req, res) => {
   try {
     const id = String(req.params.id);
-    if (!db.prepare("SELECT 1 FROM partner_applications WHERE id=?").get(id))
+    if (!(await db.prepare("SELECT 1 FROM partner_applications WHERE id=?").get(id)))
       return res.status(404).json({ error: "Application not found" });
-    const out = auth.banPartner(id, {
+    const out = await auth.banPartner(id, {
       until: req.body?.until || "",
       reason: req.body?.reason || "",
       actor: req.adminEmail,
     });
     if (!out.ok) return res.status(out.status || 400).json({ error: out.error });
-    const saved = recordBan(id, {
+    const saved = await recordBan(id, {
       action: "banned",
       by: req.adminEmail,
       until: out.ban.until,
       reason: out.ban.reason,
     });
-    audit(req.adminEmail, "partner_banned", {
+    await audit(req.adminEmail, "partner_banned", {
       appId: saved?.appId,
       loginId: out.account.login_id,
       until: out.ban.until || "until unbanned",
       reason: out.ban.reason,
     });
-    res.json({ ok: true, application: withLogin(saved), message: banMessage(out.ban, out.account.role) });
+    res.json({ ok: true, application: await withLogin(saved), message: banMessage(out.ban, out.account.role) });
   } catch (err) {
     console.error("Ban failed:", err.message);
     res.status(500).json({ error: "Could not ban the login. Please try again." });
   }
 });
-app.post("/api/partner-applications/:id/unban", adminGuard, (req, res) => {
+
+app.post("/api/partner-applications/:id/unban", adminGuard, async (req, res) => {
   try {
     const id = String(req.params.id);
-    if (!db.prepare("SELECT 1 FROM partner_applications WHERE id=?").get(id))
+    if (!(await db.prepare("SELECT 1 FROM partner_applications WHERE id=?").get(id)))
       return res.status(404).json({ error: "Application not found" });
-    const out = auth.unbanPartner(id);
+    const out = await auth.unbanPartner(id);
     if (!out.ok) return res.status(out.status || 400).json({ error: out.error });
-    const saved = recordBan(id, { action: "unbanned", by: req.adminEmail });
-    audit(req.adminEmail, "partner_unbanned", { appId: saved?.appId, loginId: out.account.login_id });
-    res.json({ ok: true, application: withLogin(saved) });
+    const saved = await recordBan(id, { action: "unbanned", by: req.adminEmail });
+    await audit(req.adminEmail, "partner_unbanned", { appId: saved?.appId, loginId: out.account.login_id });
+    res.json({ ok: true, application: await withLogin(saved) });
   } catch (err) {
     console.error("Unban failed:", err.message);
     res.status(500).json({ error: "Could not unban the login. Please try again." });
   }
 });
-// Create a login for an accepted application that has none yet, or issue a new temporary password.
+
 app.post(
   "/api/partner-applications/:id/portal-login",
   adminGuard,
   async (req, res) => {
     try {
-      const row = db
+      const row = await db
         .prepare("SELECT payload FROM partner_applications WHERE id=?")
         .get(String(req.params.id));
       if (!row) return res.status(404).json({ error: "Application not found" });
       const app = JSON.parse(row.payload);
       if (app.status !== "Accepted")
-        return res
-          .status(400)
-          .json({
-            error: "Accept the application before creating a portal login.",
-          });
+        return res.status(400).json({
+          error: "Accept the application before creating a portal login.",
+        });
       const r = await auth.ensurePartnerAccount(app, { reset: true });
-      audit(
+      await audit(
         req.adminEmail,
         r.created ? "partner_login_created" : "partner_password_reset",
         { appId: app.appId, loginId: r.account.login_id },
@@ -1597,10 +1670,10 @@ app.post(
           ? approvedEmail(app, { login, supportEmail: SUPPORT_EMAIL })
           : newPasswordEmail(app, { login, supportEmail: SUPPORT_EMAIL }),
       );
-      const saved = recordApplicantEmail(app.id, r.created ? "login_created" : "new_password", email, req.adminEmail) || app;
+      const saved = (await recordApplicantEmail(app.id, r.created ? "login_created" : "new_password", email, req.adminEmail)) || app;
       res.json({
         ok: true,
-        application: withLogin(saved),
+        application: await withLogin(saved),
         credentials: credentialsFor(req, app, login, email),
       });
     } catch (err) {
@@ -1609,31 +1682,33 @@ app.post(
     }
   },
 );
-app.get("/api/partner-applications", adminGuard, (req, res) => {
+
+app.get("/api/partner-applications", adminGuard, async (req, res) => {
   try {
-    const rows = db
-        .prepare(
-          "SELECT payload FROM partner_applications ORDER BY submitted_at DESC",
-        )
-        .all(),
-      logins = auth.accountsByApplication();
+    const rows = await db
+      .prepare("SELECT payload FROM partner_applications ORDER BY submitted_at DESC")
+      .all();
+    const logins = await auth.accountsByApplication();
     res.json(
       rows.map((r) => {
         const a = JSON.parse(r.payload);
         return { ...a, documents: (a.documents || []).map(({ storedName, ...doc }) => doc), portalLogin: logins.get(a.id) || null };
       }),
     );
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Could not load applications" });
   }
 });
-// ---------- Admin notifications for new website applications (admin-notifications.js) ----------
-function findApplicationByKey(key) {
-  const row = db.prepare("SELECT payload FROM partner_applications WHERE submission_key=?").get(key);
+
+async function findApplicationByKey(key) {
+  const row = await db
+    .prepare("SELECT payload FROM partner_applications WHERE submission_key=?")
+    .get(key);
   if (!row) return null;
   const a = JSON.parse(row.payload);
   return { ...a, documents: (a.documents || []).map(({ storedName, ...doc }) => doc) };
 }
+
 const adminNotifications = createAdminNotifications({
   db,
   transport: { sendMail: (message) => sendSupportMail(message) },
@@ -1641,7 +1716,7 @@ const adminNotifications = createAdminNotifications({
   audit: (actor, action, details) => audit(actor, action, details),
   log: console,
 });
-// Open dashboards connected through the notification stream (one per browser tab).
+
 const adminStreams = new Set();
 function broadcastAdminNotification(data) {
   const chunk = `event: notification\ndata: ${JSON.stringify(data)}\n\n`;
@@ -1653,11 +1728,12 @@ function broadcastAdminNotification(data) {
     }
   }
 }
-app.get("/api/admin/notifications", adminGuard, (req, res) => {
+
+app.get("/api/admin/notifications", adminGuard, async (req, res) => {
   try {
     res.set("Cache-Control", "no-store");
     res.json(
-      adminNotifications.list(req.account.id, {
+      await adminNotifications.list(req.account.id, {
         type: String(req.query.type || ""),
         status: String(req.query.status || ""),
       }),
@@ -1667,9 +1743,8 @@ app.get("/api/admin/notifications", adminGuard, (req, res) => {
     res.status(500).json({ error: "Could not load notifications" });
   }
 });
-// Real-time: the dashboard keeps this connection open. A new application is pushed at once; if the admin is
-// offline the notification is simply waiting in the database and shows up at the next sign-in.
-app.get("/api/admin/notifications/stream", adminGuard, (req, res) => {
+
+app.get("/api/admin/notifications/stream", adminGuard, async (req, res) => {
   res.set({
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-store",
@@ -1679,10 +1754,10 @@ app.get("/api/admin/notifications/stream", adminGuard, (req, res) => {
   res.flushHeaders();
   const client = { res, accountId: req.account.id };
   adminStreams.add(client);
-  res.write(`event: ready\ndata: ${JSON.stringify({ unreadCount: adminNotifications.unreadCount(req.account.id) })}\n\n`);
-  const heartbeat = setInterval(() => {
-    // Stop streaming as soon as the admin's session has ended.
-    if (!auth.getSession(req, "admin")) {
+  const unread = await adminNotifications.unreadCount(req.account.id);
+  res.write(`event: ready\ndata: ${JSON.stringify({ unreadCount: unread })}\n\n`);
+  const heartbeat = setInterval(async () => {
+    if (!(await auth.getSession(req, "admin"))) {
       cleanup();
       return res.end();
     }
@@ -1694,37 +1769,40 @@ app.get("/api/admin/notifications/stream", adminGuard, (req, res) => {
   };
   req.on("close", cleanup);
 });
+
 function notificationAction(read) {
-  return (req, res) => {
-    const ok = adminNotifications.setRead(req.account.id, String(req.params.id), read);
+  return async (req, res) => {
+    const ok = await adminNotifications.setRead(req.account.id, String(req.params.id), read);
     if (!ok) return res.status(404).json({ error: "Notification not found." });
-    res.json({ ok: true, unreadCount: adminNotifications.unreadCount(req.account.id) });
+    res.json({ ok: true, unreadCount: await adminNotifications.unreadCount(req.account.id) });
   };
 }
 app.post("/api/admin/notifications/:id/read", adminGuard, notificationAction(true));
 app.post("/api/admin/notifications/:id/unread", adminGuard, notificationAction(false));
-app.post("/api/admin/notifications/:id/delete", adminGuard, (req, res) => {
-  const ok = adminNotifications.remove(req.account.id, String(req.params.id));
+app.post("/api/admin/notifications/:id/delete", adminGuard, async (req, res) => {
+  const ok = await adminNotifications.remove(req.account.id, String(req.params.id));
   if (!ok) return res.status(404).json({ error: "Notification not found." });
-  res.json({ ok: true, unreadCount: adminNotifications.unreadCount(req.account.id) });
+  res.json({ ok: true, unreadCount: await adminNotifications.unreadCount(req.account.id) });
 });
 app.post("/api/admin/notifications/:id/resend-email", adminGuard, async (req, res) => {
   const id = String(req.params.id);
-  if (!adminNotifications.exists(id, req.account.id)) return res.status(404).json({ error: "Notification not found." });
+  if (!(await adminNotifications.exists(id, req.account.id)))
+    return res.status(404).json({ error: "Notification not found." });
   const result = await adminNotifications.sendEmail(id, { actor: req.adminEmail });
-  res.json({ ok: !!result?.sent, emailStatus: adminNotifications.emailStatusOf(id) });
+  res.json({ ok: !!result?.sent, emailStatus: await adminNotifications.emailStatusOf(id) });
 });
-// Retry worker for admin emails that failed (pending or failed, due, under the attempt limit).
+
 setTimeout(() => adminNotifications.processDue().catch((e) => console.error("Admin email retry:", e.message)), 10_000).unref?.();
 setInterval(() => adminNotifications.processDue().catch((e) => console.error("Admin email retry:", e.message)), 60_000).unref?.();
 
-// ---------- Vendor / Franchise portal data (each partner sees only their own) ----------
+// ---------- Vendor / Franchise portal data ----------
 const portalGuard = (req, res, next) => {
   const portal = portalOf(req.query.portal);
   if (portal !== "vendor" && portal !== "franchise")
     return res.status(400).json({ error: "Unknown portal." });
   return auth.requireRole(portal)(req, res, next);
 };
+
 function initialPortalData(account, app) {
   return {
     id: account.login_id,
@@ -1739,25 +1817,26 @@ function initialPortalData(account, app) {
     office: "",
     address: app.address || app.fullAddress || "",
     remarks: app.remarks || "",
-    locations: [], // partners add their own locations (each one needs a map link)
+    locations: [],
     riders: [],
     orderRecords: [],
     orders: 0,
     applications: [],
   };
 }
-app.get("/api/portal/data", portalGuard, (req, res) => {
+
+app.get("/api/portal/data", portalGuard, async (req, res) => {
   const account = req.account;
-  const row = db
+  const row = await db
     .prepare("SELECT data FROM portal_data WHERE account_id=?")
     .get(account.id);
   const appRow =
     account.application_id &&
-    db
+    (await db
       .prepare("SELECT payload FROM partner_applications WHERE id=?")
-      .get(account.application_id);
+      .get(account.application_id));
   const application = appRow ? JSON.parse(appRow.payload) : {};
-  let data = row
+  const data = row
     ? JSON.parse(row.data)
     : initialPortalData(account, application);
   data.id = account.login_id;
@@ -1772,17 +1851,14 @@ app.get("/api/portal/data", portalGuard, (req, res) => {
     },
   });
 });
-// Admin-uploaded weekly / 15-day payments. The account id and approved Rider Registration
-// ownership are taken from the authenticated session; a franchise cannot request another rider.
-app.get("/api/portal/weekly-payments", portalGuard, (req, res) => {
-  // Franchise and vendor accounts each see only the approved riders they registered (matched by Rider ID).
+
+app.get("/api/portal/weekly-payments", portalGuard, async (req, res) => {
   if (req.account.role !== "franchise" && req.account.role !== "vendor")
     return res.status(403).json({ error: "Partner access required." });
   try {
-    // Vendors and franchises get the Reports figures, built from the same rows as their Orders page (partner-reports.js).
     const week =
       typeof req.query.week === "string" ? req.query.week.slice(0, 64) : "";
-    const { records, report } = partnerPortalPayload(
+    const { records, report } = await partnerPortalPayload(
       db,
       req.account.role,
       req.account.id,
@@ -1795,16 +1871,16 @@ app.get("/api/portal/weekly-payments", portalGuard, (req, res) => {
     res.status(500).json({ error: "Could not load payment history." });
   }
 });
-app.put("/api/portal/data", portalGuard, (req, res) => {
+
+app.put("/api/portal/data", portalGuard, async (req, res) => {
   const data = req.body?.data;
   if (!data || typeof data !== "object" || Array.isArray(data))
     return res.status(400).json({ error: "Nothing to save." });
   for (const k of ["locations", "riders", "orderRecords"])
     if (data[k] !== undefined && !Array.isArray(data[k]))
       return res.status(400).json({ error: "Invalid " + k + "." });
-  data.id = req.account.login_id; // partners cannot change their own ID
-  // Orders come from the admin's payment imports; a portal save (possibly from an older open page) must not change them.
-  const stored = db
+  data.id = req.account.login_id;
+  const stored = await db
     .prepare("SELECT data FROM portal_data WHERE account_id=?")
     .get(req.account.id);
   data.orderRecords = stored ? JSON.parse(stored.data).orderRecords || [] : [];
@@ -1813,18 +1889,19 @@ app.put("/api/portal/data", portalGuard, (req, res) => {
     return res
       .status(413)
       .json({ error: "Too much data to save. Try a smaller profile photo." });
-  db.prepare(
-    "INSERT INTO portal_data(account_id,data,updated_at) VALUES(?,?,?) ON CONFLICT(account_id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at",
-  ).run(req.account.id, json, new Date().toISOString());
-  removeUnusedFiles(req.account.id, data);
+  await db
+    .prepare(
+      "INSERT INTO portal_data(account_id,data,updated_at) VALUES(?,?,?) ON CONFLICT(account_id) DO UPDATE SET data=EXCLUDED.data,updated_at=EXCLUDED.updated_at",
+    )
+    .run(req.account.id, json, new Date().toISOString());
+  await removeUnusedFiles(req.account.id, data);
   res.json({ ok: true });
 });
-// ---------- Rider documents (screenshot, Aadhaar) ----------
-// Files are kept in backend/uploads/<account>/ (never in a public folder) and only the partner who
-// uploaded them can open them. Each upload is checked to really be an image (or a PDF for Aadhaar).
-db.exec(
+
+await db.exec(
   "CREATE TABLE IF NOT EXISTS portal_files(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,kind TEXT NOT NULL,original_name TEXT,mime TEXT NOT NULL,size INTEGER NOT NULL,stored_name TEXT NOT NULL,created_at TEXT NOT NULL)",
 );
+
 const FILE_KINDS = {
   screenshot: ["image/jpeg", "image/png", "image/webp"],
   aadhaar: ["image/jpeg", "image/png", "image/webp", "application/pdf"],
@@ -1835,7 +1912,6 @@ const FILE_EXT = {
   "image/webp": ".webp",
   "application/pdf": ".pdf",
 };
-// Decide the type from the file's first bytes, not from its name or what the browser claims.
 function sniffType(b) {
   if (b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff)
     return "image/jpeg";
@@ -1864,35 +1940,35 @@ const fileRow = (id, accountId) =>
   db
     .prepare("SELECT * FROM portal_files WHERE id=? AND account_id=?")
     .get(String(id), accountId);
-function deleteStoredFile(row) {
+async function deleteStoredFile(row) {
   try {
     fs.unlinkSync(path.join(UPLOAD_DIR, row.account_id, row.stored_name));
-  } catch (e) {}
-  db.prepare("DELETE FROM portal_files WHERE id=?").run(row.id);
+  } catch {}
+  await db.prepare("DELETE FROM portal_files WHERE id=?").run(row.id);
 }
-// Files no longer used by any rider are removed (a short grace period covers uploads still being saved).
-function removeUnusedFiles(accountId, data) {
+async function removeUnusedFiles(accountId, data) {
   const used = new Set();
   for (const r of Array.isArray(data?.riders) ? data.riders : [])
     for (const k of ["screenshotFile", "aadhaarFile"])
       if (r && r[k] && r[k].id) used.add(String(r[k].id));
   const cutoff = new Date(Date.now() - 30 * 60_000).toISOString();
-  for (const row of db
+  const rows = await db
     .prepare("SELECT * FROM portal_files WHERE account_id=? AND created_at<?")
-    .all(accountId, cutoff))
-    if (!used.has(row.id)) deleteStoredFile(row);
+    .all(accountId, cutoff);
+  for (const row of rows) {
+    if (!used.has(row.id)) await deleteStoredFile(row);
+  }
 }
+
 app.post("/api/portal/files", portalGuard, (req, res) => {
   fileUpload.single("file")(req, res, async (err) => {
     if (err)
-      return res
-        .status(400)
-        .json({
-          error:
-            err.code === "LIMIT_FILE_SIZE"
-              ? "The file is too large. Please upload a file under 5 MB."
-              : "Could not read the file. Please try another one.",
-        });
+      return res.status(400).json({
+        error:
+          err.code === "LIMIT_FILE_SIZE"
+            ? "The file is too large. Please upload a file under 5 MB."
+            : "Could not read the file. Please try another one.",
+      });
     try {
       const kind = String(req.body?.kind || ""),
         allowed = FILE_KINDS[kind];
@@ -1903,19 +1979,16 @@ app.post("/api/portal/files", portalGuard, (req, res) => {
         return res.status(400).json({ error: "Choose a file to upload." });
       const type = sniffType(f.buffer);
       if (!allowed.includes(type))
-        return res
-          .status(400)
-          .json({
-            error:
-              kind === "aadhaar"
-                ? "Aadhaar must be a JPG, PNG or WEBP image, or a PDF."
-                : "The screenshot must be a JPG, PNG or WEBP image.",
-          });
-      if (
-        db
-          .prepare("SELECT COUNT(*) AS n FROM portal_files WHERE account_id=?")
-          .get(req.account.id).n >= 500
-      )
+        return res.status(400).json({
+          error:
+            kind === "aadhaar"
+              ? "Aadhaar must be a JPG, PNG or WEBP image, or a PDF."
+              : "The screenshot must be a JPG, PNG or WEBP image.",
+        });
+      const countRow = await db
+        .prepare("SELECT COUNT(*) AS n FROM portal_files WHERE account_id=?")
+        .get(req.account.id);
+      if (Number(countRow?.n || 0) >= 500)
         return res
           .status(400)
           .json({ error: "This account has reached its upload limit." });
@@ -1929,19 +2002,20 @@ app.post("/api/portal/files", portalGuard, (req, res) => {
           .basename(String(f.originalname || ""))
           .replace(/[^\w.\- ()]/g, "_")
           .slice(0, 100) || kind + FILE_EXT[type];
-      db.prepare(
-        "INSERT INTO portal_files(id,account_id,kind,original_name,mime,size,stored_name,created_at) VALUES(?,?,?,?,?,?,?,?)",
-      ).run(
-        id,
-        req.account.id,
-        kind,
-        name,
-        type,
-        f.size,
-        stored,
-        new Date().toISOString(),
-      );
-      // Screenshots of the delivery app: read the Partner ID and name so the form can fill them in.
+      await db
+        .prepare(
+          "INSERT INTO portal_files(id,account_id,kind,original_name,mime,size,stored_name,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          id,
+          req.account.id,
+          kind,
+          name,
+          type,
+          f.size,
+          stored,
+          new Date().toISOString(),
+        );
       const read =
         kind === "screenshot" ? await readRiderScreenshot(f.buffer) : undefined;
       res
@@ -1955,9 +2029,7 @@ app.post("/api/portal/files", portalGuard, (req, res) => {
     }
   });
 });
-// Rider Applications forms (Admin, Vendor, Franchise portals): read the Rider ID / Partner ID and name from a
-// delivery-app screenshot so the form can fill them in. The image is read in memory and is not stored by this route
-// (the form uploads it with the application). Text recognition runs on this server.
+
 const screenshotReadLimiter = rateLimit({
   windowMs: 10 * 60_000,
   max: 60,
@@ -1998,8 +2070,9 @@ app.post(
     });
   },
 );
-app.get("/api/portal/files/:id", portalGuard, (req, res) => {
-  const row = fileRow(req.params.id, req.account.id);
+
+app.get("/api/portal/files/:id", portalGuard, async (req, res) => {
+  const row = await fileRow(req.params.id, req.account.id);
   if (!row) return res.status(404).json({ error: "File not found." });
   res.set({
     "Content-Type": row.mime,
@@ -2015,28 +2088,27 @@ app.get("/api/portal/files/:id", portalGuard, (req, res) => {
     },
   );
 });
-app.delete("/api/portal/files/:id", portalGuard, (req, res) => {
-  const row = fileRow(req.params.id, req.account.id);
-  if (row) deleteStoredFile(row);
+
+app.delete("/api/portal/files/:id", portalGuard, async (req, res) => {
+  const row = await fileRow(req.params.id, req.account.id);
+  if (row) await deleteStoredFile(row);
   res.json({ ok: true });
 });
-// ---------- Payment data → vendor / franchise portals ----------
-// When an admin imports the payment Excel, each row is matched to the partner whose Riders list has that rider
-// (by Rider ID / Partner ID, otherwise by name when only one partner has a rider with that name). Matched rows
-// fill that partner's Orders page and the partner gets a notification. Nothing is shared with other partners.
-db.exec(`CREATE TABLE IF NOT EXISTS notifications(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,kind TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,meta TEXT,created_at TEXT NOT NULL,read_at TEXT);
-CREATE INDEX IF NOT EXISTS notifications_account ON notifications(account_id,created_at);`);
-const normRiderId = (v) =>
-  String(v ?? "")
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, "");
-const normRiderName = (v) =>
-  String(v ?? "")
-    .toLowerCase()
-    .replace(/\([^)]*\)/g, " ")
-    .replace(/[^a-z]+/g, " ")
-    .trim();
+
+await db.exec(`
+  CREATE TABLE IF NOT EXISTS notifications(
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    meta TEXT,
+    created_at TEXT NOT NULL,
+    read_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS notifications_account ON notifications(account_id,created_at);
+`);
+
 const fmtDay = (iso) => {
   const d = new Date(iso + "T12:00:00");
   return isNaN(d)
@@ -2047,36 +2119,37 @@ const fmtDay = (iso) => {
         year: "numeric",
       });
 };
-function addNotification(accountId, kind, title, body, meta) {
-  db.prepare(
-    "INSERT INTO notifications(id,account_id,kind,title,body,meta,created_at) VALUES(?,?,?,?,?,?,?)",
-  ).run(
-    crypto.randomUUID(),
-    accountId,
-    kind,
-    title,
-    body,
-    JSON.stringify(meta || {}),
-    new Date().toISOString(),
-  );
-  // keep the newest 200 per partner
-  db.prepare(
-    "DELETE FROM notifications WHERE account_id=? AND id NOT IN (SELECT id FROM notifications WHERE account_id=? ORDER BY created_at DESC LIMIT 200)",
-  ).run(accountId, accountId);
+async function addNotification(accountId, kind, title, body, meta) {
+  await db
+    .prepare(
+      "INSERT INTO notifications(id,account_id,kind,title,body,meta,created_at) VALUES(?,?,?,?,?,?,?)",
+    )
+    .run(
+      crypto.randomUUID(),
+      accountId,
+      kind,
+      title,
+      body,
+      JSON.stringify(meta || {}),
+      new Date().toISOString(),
+    );
+  await db
+    .prepare(
+      "DELETE FROM notifications WHERE account_id=? AND id NOT IN (SELECT id FROM notifications WHERE account_id=? ORDER BY created_at DESC LIMIT 200)",
+    )
+    .run(accountId, accountId);
 }
-// Versioned Excel payment imports (see payment-imports.js for the matching rules).
+
 const paymentImports = createPaymentImportService({ db, audit });
-// Writes one imported version into the partners' Orders pages, inside the same transaction as the import:
-// each vendor / franchise gets only the rows matched to its own riders. Earlier orders from payment imports
-// are replaced, so the latest file is the active data source. Partner-entered records are kept.
-function projectPaymentVersion(versionId, matched, fileName) {
+
+async function projectPaymentVersion(versionId, matched, fileName) {
   const now = new Date().toISOString();
-  const partners = db
+  const partnerRows = await db
     .prepare(
       "SELECT a.id,a.login_id,a.name,a.role,p.data FROM accounts a JOIN portal_data p ON p.account_id=a.id WHERE a.role IN ('vendor','franchise') AND a.status='active'",
     )
-    .all()
-    .map((r) => ({ ...r, data: JSON.parse(r.data) }));
+    .all();
+  const partners = partnerRows.map((r) => ({ ...r, data: JSON.parse(r.data) }));
   const byOwner = new Map();
   for (const m of matched) {
     if (!byOwner.has(m.ownerAccountId)) byOwner.set(m.ownerAccountId, []);
@@ -2092,7 +2165,7 @@ function projectPaymentVersion(versionId, matched, fileName) {
       ? p.data.orderRecords
       : [];
     const kept = previous.filter((o) => o.source !== "payment-import");
-    if (!mine.length && previous.length === kept.length) continue; // nothing to add and nothing to remove
+    if (!mine.length && previous.length === kept.length) continue;
     const fresh = mine.map((m) => ({
       riderId: m.riderId,
       riderName: m.riderName,
@@ -2115,7 +2188,7 @@ function projectPaymentVersion(versionId, matched, fileName) {
         String(a.riderName).localeCompare(String(b.riderName)),
     );
     p.data.orderRecords = orders;
-    saveData.run(JSON.stringify(p.data), now, p.id);
+    await saveData.run(JSON.stringify(p.data), now, p.id);
     if (mine.length) {
       const dates = mine.map((m) => m.date).sort(),
         riders = new Set(mine.map((m) => m.riderId));
@@ -2124,7 +2197,7 @@ function projectPaymentVersion(versionId, matched, fileName) {
           ? fmtDay(dates[0])
           : `${fmtDay(dates[0])} – ${fmtDay(dates[dates.length - 1])}`;
       const total = mine.reduce((n, m) => n + m.lm, 0);
-      addNotification(
+      await addNotification(
         p.id,
         "payment",
         "Payment data updated",
@@ -2149,16 +2222,17 @@ function projectPaymentVersion(versionId, matched, fileName) {
   }
   return shared;
 }
-app.post("/api/admin/payment-import", adminGuard, (req, res) => {
+
+app.post("/api/admin/payment-import", adminGuard, async (req, res) => {
   try {
     const fileName =
       oneLine(req.body?.fileName).slice(0, 120) || "payment file";
     let shared = [];
-    const out = paymentImports.importRows(
+    const out = await paymentImports.importRows(
       { fileName, fileHash: req.body?.fileHash, records: req.body?.records },
       req.adminEmail || "",
-      (versionId, matched) => {
-        shared = projectPaymentVersion(versionId, matched, fileName);
+      async (versionId, matched) => {
+        shared = await projectPaymentVersion(versionId, matched, fileName);
       },
     );
     if (out.alreadyImported)
@@ -2170,10 +2244,9 @@ app.post("/api/admin/payment-import", adminGuard, (req, res) => {
         shared: [],
         flagged: [],
       });
-    // Rows an admin must look at: name mismatches and riders not found in the registrations.
-    const flagged = paymentImports
-      .rowsOf({ versionId: out.activeVersionId })
-      .rows.filter((r) => r.status === "review" || r.status === "unmatched")
+    const versionRows = await paymentImports.rowsOf({ versionId: out.activeVersionId });
+    const flagged = versionRows.rows
+      .filter((r) => r.status === "review" || r.status === "unmatched")
       .map((r) => ({
         status: r.status,
         riderId: r.riderId,
@@ -2182,7 +2255,7 @@ app.post("/api/admin/payment-import", adminGuard, (req, res) => {
         note: r.note,
       }))
       .slice(0, 500);
-    audit(req.adminEmail, "payment_import_shared", {
+    await audit(req.adminEmail, "payment_import_shared", {
       fileName,
       versionId: out.activeVersionId,
       partners: shared.map((x) => x.loginId),
@@ -2207,20 +2280,19 @@ app.post("/api/admin/payment-import", adminGuard, (req, res) => {
     if (err instanceof PaymentImportError)
       return res.status(err.status).json({ error: err.message });
     console.error("Payment import failed:", err);
-    res
-      .status(500)
-      .json({
-        error:
-          "The Excel file could not be imported. The previous payment data is unchanged. Please try again.",
-      });
+    res.status(500).json({
+      error:
+        "The Excel file could not be imported. The previous payment data is unchanged. Please try again.",
+    });
   }
 });
-// Version history (every imported file is kept) and the rows of one version. Admin sign-in only.
-app.get("/api/admin/payment-imports", adminGuard, (req, res) => {
+
+app.get("/api/admin/payment-imports", adminGuard, async (req, res) => {
   res.set("Cache-Control", "no-store");
-  res.json({ ok: true, ...paymentImports.listVersions() });
+  res.json({ ok: true, ...(await paymentImports.listVersions()) });
 });
-app.get("/api/admin/payment-imports/rows", adminGuard, (req, res) => {
+
+app.get("/api/admin/payment-imports/rows", adminGuard, async (req, res) => {
   try {
     const status = ["matched", "review", "unmatched", "no_partner"].includes(
       req.query.status,
@@ -2230,51 +2302,54 @@ app.get("/api/admin/payment-imports/rows", adminGuard, (req, res) => {
     res.set("Cache-Control", "no-store");
     res.json({
       ok: true,
-      ...paymentImports.rowsOf({
+      ...(await paymentImports.rowsOf({
         versionId: req.query.version ? String(req.query.version) : undefined,
         status,
-      }),
+      })),
     });
   } catch (err) {
     console.error("Could not read payment rows:", err);
     res.status(500).json({ error: "Could not load the payment rows." });
   }
 });
-// Partner notifications
-app.get("/api/portal/notifications", portalGuard, (req, res) => {
-  const items = db
+
+app.get("/api/portal/notifications", portalGuard, async (req, res) => {
+  const rows = await db
     .prepare(
       "SELECT id,kind,title,body,created_at,read_at FROM notifications WHERE account_id=? ORDER BY created_at DESC LIMIT 100",
     )
-    .all(req.account.id)
-    .map((n) => ({
-      id: n.id,
-      kind: n.kind,
-      title: n.title,
-      body: n.body,
-      createdAt: n.created_at,
-      read: !!n.read_at,
-    }));
+    .all(req.account.id);
+  const items = rows.map((n) => ({
+    id: n.id,
+    kind: n.kind,
+    title: n.title,
+    body: n.body,
+    createdAt: n.created_at,
+    read: !!n.read_at,
+  }));
   res.json({ ok: true, items, unread: items.filter((n) => !n.read).length });
 });
-app.post("/api/portal/notifications/read", portalGuard, (req, res) => {
+
+app.post("/api/portal/notifications/read", portalGuard, async (req, res) => {
   const t = new Date().toISOString();
   if (req.body?.id)
-    db.prepare(
-      "UPDATE notifications SET read_at=? WHERE id=? AND account_id=? AND read_at IS NULL",
-    ).run(t, String(req.body.id), req.account.id);
+    await db
+      .prepare(
+        "UPDATE notifications SET read_at=? WHERE id=? AND account_id=? AND read_at IS NULL",
+      )
+      .run(t, String(req.body.id), req.account.id);
   else
-    db.prepare(
-      "UPDATE notifications SET read_at=? WHERE account_id=? AND read_at IS NULL",
-    ).run(t, req.account.id);
+    await db
+      .prepare(
+        "UPDATE notifications SET read_at=? WHERE account_id=? AND read_at IS NULL",
+      )
+      .run(t, req.account.id);
   res.json({ ok: true });
 });
-// Admin Reports: totals, 15-day / 365-day periods and rider-week rows. The source is the saved weekly payment rows
-// (weekly_payments), the same rows the Payments page shows, so an Excel import updates both at once.
-// Partner rider lists are read only to find each rider's hub. Admin sign-in only.
-app.get("/api/admin/reports", adminGuard, (req, res) => {
+
+app.get("/api/admin/reports", adminGuard, async (req, res) => {
   try {
-    const partners = db
+    const partners = await db
       .prepare(
         "SELECT p.data FROM accounts a JOIN portal_data p ON p.account_id=a.id WHERE a.role IN ('vendor','franchise') AND a.status='active'",
       )
@@ -2282,11 +2357,11 @@ app.get("/api/admin/reports", adminGuard, (req, res) => {
     const datas = partners.map((r) => {
       try {
         return JSON.parse(r.data);
-      } catch (e) {
+      } catch {
         return {};
       }
     });
-    const weekly = db
+    const weekly = await db
       .prepare(
         "SELECT id,rider_id,rider_name,week_label,week_start,week_end,days,total_orders,lm,primary_orders,club,sdd,lm_amount,prime_amount,club_amount,sdd_amount,amount,payment_status FROM weekly_payments",
       )
@@ -2312,40 +2387,43 @@ app.get("/api/admin/reports", adminGuard, (req, res) => {
       .json({ error: "Could not build the report. Please try again." });
   }
 });
+
 app.get("/api/health", (req, res) =>
   res.json({
     ok: true,
+    database: "postgresql",
     gateway: "Razorpay",
     mode: process.env.RAZORPAY_KEY_ID?.startsWith("rzp_test_")
       ? "sandbox"
       : "live",
   }),
 );
-app.get("/api/payments/history", adminGuard, (req, res) =>
+
+app.get("/api/payments/history", adminGuard, async (req, res) =>
   res.json(
-    db
+    await db
       .prepare("SELECT * FROM transactions ORDER BY created_at DESC LIMIT 1000")
       .all(),
   ),
 );
-app.get("/api/autopay", adminGuard, (req, res) =>
+
+app.get("/api/autopay", adminGuard, async (req, res) =>
   res.json(
-    db
+    await db
       .prepare("SELECT * FROM subscriptions ORDER BY next_payment_at ASC")
       .all(),
   ),
 );
+
 app.post("/api/autopay/create", adminGuard, async (req, res) => {
   try {
     const { payerName, payerEmail, payerType, amount, frequency, consent } =
       req.body || {};
     if (!payerName || !amount || !frequency || !consent)
-      return res
-        .status(400)
-        .json({
-          error:
-            "Payer name, amount, frequency and explicit consent are required",
-        });
+      return res.status(400).json({
+        error:
+          "Payer name, amount, frequency and explicit consent are required",
+      });
     const planId = planFor(frequency);
     if (!planId)
       return res
@@ -2365,23 +2443,25 @@ app.post("/api/autopay/create", adminGuard, async (req, res) => {
       body: JSON.stringify(payload),
     });
     const now = new Date().toISOString();
-    db.prepare(
-      `INSERT INTO subscriptions(id,payer_name,payer_email,payer_type,amount,frequency,status,gateway,gateway_subscription_id,consent_at,created_at,next_payment_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-    ).run(
-      crypto.randomUUID(),
-      payerName,
-      payerEmail || "",
-      payerType || "Customer",
-      Number(amount),
-      frequency,
-      "Pending Authorization",
-      "razorpay",
-      sub.id,
-      now,
-      now,
-      null,
-    );
-    audit(req.adminEmail, "autopay_created", {
+    await db
+      .prepare(
+        `INSERT INTO subscriptions(id,payer_name,payer_email,payer_type,amount,frequency,status,gateway,gateway_subscription_id,consent_at,created_at,next_payment_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        payerName,
+        payerEmail || "",
+        payerType || "Customer",
+        Number(amount),
+        frequency,
+        "Pending Authorization",
+        "razorpay",
+        sub.id,
+        now,
+        now,
+        null,
+      );
+    await audit(req.adminEmail, "autopay_created", {
       gateway_subscription_id: sub.id,
       payer: payerName,
       frequency,
@@ -2396,60 +2476,59 @@ app.post("/api/autopay/create", adminGuard, async (req, res) => {
     res.status(502).json({ error: err.message });
   }
 });
+
 app.post("/api/autopay/:id/pause", adminGuard, async (req, res) => {
   try {
     const out = await razor(
       `/subscriptions/${encodeURIComponent(req.params.id)}/pause`,
       { method: "POST", body: JSON.stringify({ pause_at: "now" }) },
     );
-    db.prepare(
-      "UPDATE subscriptions SET status=? WHERE gateway_subscription_id=?",
-    ).run("Paused", req.params.id);
-    audit(req.adminEmail, "autopay_paused", { id: req.params.id });
-    res.json(out);
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-app.post("/api/autopay/:id/resume", adminGuard, async (req, res) => {
-  try {
-    const out = await razor(
-      `/subscriptions/${encodeURIComponent(req.params.id)}/resume`,
-      { method: "POST", body: JSON.stringify({ resume_at: "now" }) },
-    );
-    db.prepare(
-      "UPDATE subscriptions SET status=? WHERE gateway_subscription_id=?",
-    ).run("Active", req.params.id);
-    audit(req.adminEmail, "autopay_resumed", { id: req.params.id });
-    res.json(out);
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-app.post("/api/autopay/:id/cancel", adminGuard, async (req, res) => {
-  try {
-    const out = await razor(
-      `/subscriptions/${encodeURIComponent(req.params.id)}/cancel`,
-      { method: "POST", body: JSON.stringify({ cancel_at_cycle_end: 0 }) },
-    );
-    db.prepare(
-      "UPDATE subscriptions SET status=? WHERE gateway_subscription_id=?",
-    ).run("Cancelled", req.params.id);
-    audit(req.adminEmail, "autopay_cancelled", { id: req.params.id });
+    await db
+      .prepare("UPDATE subscriptions SET status=? WHERE gateway_subscription_id=?")
+      .run("Paused", req.params.id);
+    await audit(req.adminEmail, "autopay_paused", { id: req.params.id });
     res.json(out);
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
 });
 
-// ===================== Helpline / Support (Vendor, Franchise and Admin) =====================
-// Tickets are stored in the database (support-tickets.js) and handled by the routes in support-routes.js.
-// Email is sent with the Gmail account in .env (GMAIL_OAUTH_* or GMAIL_USER + GMAIL_APP_PASSWORD), or SMTP_* if those are set.
-// The Vendor / Franchise portals show this address, so the address shown is always the one that receives the messages.
+app.post("/api/autopay/:id/resume", adminGuard, async (req, res) => {
+  try {
+    const out = await razor(
+      `/subscriptions/${encodeURIComponent(req.params.id)}/resume`,
+      { method: "POST", body: JSON.stringify({ resume_at: "now" }) },
+    );
+    await db
+      .prepare("UPDATE subscriptions SET status=? WHERE gateway_subscription_id=?")
+      .run("Active", req.params.id);
+    await audit(req.adminEmail, "autopay_resumed", { id: req.params.id });
+    res.json(out);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post("/api/autopay/:id/cancel", adminGuard, async (req, res) => {
+  try {
+    const out = await razor(
+      `/subscriptions/${encodeURIComponent(req.params.id)}/cancel`,
+      { method: "POST", body: JSON.stringify({ cancel_at_cycle_end: 0 }) },
+    );
+    await db
+      .prepare("UPDATE subscriptions SET status=? WHERE gateway_subscription_id=?")
+      .run("Cancelled", req.params.id);
+    await audit(req.adminEmail, "autopay_cancelled", { id: req.params.id });
+    res.json(out);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ===================== Helpline / Support =====================
 app.get("/api/support-info", (req, res) => res.json({ ok: true, email: SUPPORT_EMAIL }));
 let mailTransporter = null;
 function getMailTransporter() {
-  // Optional: another mail provider via SMTP_HOST / SMTP_PORT / SMTP_SECURE / SMTP_USER / SMTP_PASS.
   if (process.env.SMTP_HOST) {
     const user =
       process.env.SMTP_USER || process.env.GMAIL_USER || SUPPORT_EMAIL;
@@ -2487,21 +2566,18 @@ const oneLine = (v) =>
   String(v || "")
     .replace(/[\r\n]+/g, " ")
     .trim();
-// Admin copy of every support notification: ADMIN_EMAIL when set, otherwise every active admin account's email.
-// ADMIN_EMAIL may list several addresses separated by commas.
-function supportAdminRecipients() {
+
+async function supportAdminRecipients() {
   if (process.env.ADMIN_EMAIL)
     return [...new Set(String(process.env.ADMIN_EMAIL).split(",").map((a) => a.trim()).filter(Boolean))];
-  return db
+  const rows = await db
     .prepare(
       "SELECT email FROM accounts WHERE role='admin' AND status='active' AND email IS NOT NULL AND email<>''",
     )
-    .all()
-    .map((r) => String(r.email).trim())
-    .filter(Boolean);
+    .all();
+  return rows.map((r) => String(r.email).trim()).filter(Boolean);
 }
-// Gmail API (OAuth 2.0) when GMAIL_OAUTH_* is configured; otherwise SMTP with the App Password.
-// The Gmail API sends as the authorised support account. Errors are returned as text, never with secrets.
+
 function smtpProblem() {
   const pass = String(process.env.GMAIL_APP_PASSWORD || "").trim();
   if (!pass) return "GMAIL_APP_PASSWORD is empty in backend/.env";
@@ -2524,14 +2600,13 @@ console.log(
     ? "[support-email] sending through the Gmail API (OAuth 2.0)"
     : `[support-email] Gmail API not connected; using SMTP. ${smtpProblem() || "SMTP password found."}`,
 );
+
 const supportService = createSupportService({ db, uploadDir: UPLOAD_DIR });
-// Every support email is queued in the database and sent by the outbox worker, with retries (support-mail.js).
 const supportMailer = createSupportMailer({
   db,
   uploadDir: UPLOAD_DIR,
   transport: { sendMail: (m) => sendSupportMail(m) },
 });
-// Incoming customer email through the Gmail API (support-inbound.js). Off until GMAIL_OAUTH_* is set.
 const supportInbound = createGmailInbound({
   db,
   api: gmailApi,
@@ -2550,7 +2625,6 @@ registerSupportRoutes(app, {
   adminRecipients: supportAdminRecipients,
   baseUrl: process.env.PUBLIC_URL || "",
 });
-// Retry and send due emails every 30 seconds. Check the support inbox every minute when it is connected.
 {
   const emailTimer = setInterval(() => supportMailer.runDue().catch((e) => console.error("[support-email]", e.message)), 30_000);
   emailTimer.unref?.();
@@ -2558,8 +2632,6 @@ registerSupportRoutes(app, {
   supportInbound.start(60_000);
 }
 
-// ---------- Rider member registrations (Admin, Vendor and Franchise portals; each partner sees only its own) ----------
-// Stored in the same database; documents are kept in backend/uploads/registrations (never public).
 const riderRegistrations = createRiderRegistrationService({
   db,
   uploadDir: UPLOAD_DIR,
@@ -2571,8 +2643,6 @@ registerRiderRegistrationRoutes(app, {
   onApproved: (actor) => weeklyPaymentService.recheckPending(actor),
 });
 
-// ---------- Hub Management (Admin Portal only) ----------
-// Hubs are stored in the `hubs` table. On the first start the 100 existing hubs are loaded once from data/hubs-seed.json.
 const hubService = createHubService({
   db,
   audit,
@@ -2581,33 +2651,28 @@ const hubService = createHubService({
   ),
 });
 registerHubRoutes(app, { guard: adminGuard, service: hubService });
-// ---------- Franchise & Vendor locations (partner submits, admin approves) ----------
-// Stored in the `partner_locations` table. Partners see only their own rows; only admins approve, edit or delete.
-// Approved locations become hubs in the `hubs` table (see hubs.js createFromLocation).
-// Approving a location creates its hub in Hub List (hubService), in the same database transaction.
+
 const locationService = createLocationService({ db, audit, hubService });
 registerLocationRoutes(app, {
   partnerGuard: auth.requireRole("vendor", "franchise"),
   adminGuard,
   service: locationService,
 });
-// ---------- Rider documents (Admin Portal > Documents) ----------
-// Files are kept privately in backend/uploads/admin-documents/ and opened only with an admin session.
+
 registerAdminDocumentRoutes(app, {
   guard: adminGuard,
   service: createAdminDocumentService({ db, uploadDir: UPLOAD_DIR, audit }),
 });
-// After weekly rows are saved, each vendor / franchise whose approved riders received new or changed rows gets a
-// notification. Uses the same rules as their Orders page (listForVendor / listForFranchise in weekly-payments.js).
-function notifyPartnersOfWeeklyRows({ importId, fileName }) {
-  const groups = partnerGroupsForImport(db, importId);
+
+async function notifyPartnersOfWeeklyRows({ importId, fileName }) {
+  const groups = await partnerGroupsForImport(db, importId);
   for (const g of groups) {
     const range = !g.fromDay
       ? ""
       : g.fromDay === g.toDay
         ? ` (${fmtDay(g.fromDay)})`
         : ` (${fmtDay(g.fromDay)} – ${fmtDay(g.toDay)})`;
-    addNotification(
+    await addNotification(
       g.accountId,
       "payment",
       "Payment data updated",
@@ -2616,6 +2681,7 @@ function notifyPartnersOfWeeklyRows({ importId, fileName }) {
     );
   }
 }
+
 const weeklyPaymentService = createWeeklyPaymentService({
   db,
   audit,
@@ -2627,10 +2693,6 @@ registerWeeklyPaymentRoutes(app, {
   service: weeklyPaymentService,
 });
 
-// ---------- Google Drive payment sync (Admin Portal > Payments > Google Drive) ----------
-// Files in the chosen Drive folder go through the same Excel reader as a manual upload (shared/payment-excel.cjs, also served to the browser as dashboard/payment-excel.js)
-// and the same save rules (weekly-payments.js). Setup: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and DRIVE_TOKEN_SECRET
-// in backend/.env (see .env.example). Without them the Payments page shows that Drive is not set up.
 const requireCjs = createRequire(import.meta.url);
 const XLSX = requireCjs("xlsx");
 const PaymentExcel = requireCjs("./shared/payment-excel.cjs");
@@ -2651,39 +2713,34 @@ registerDriveSyncRoutes(app, {
     `${req.protocol}://${req.get("host")}`,
 });
 driveSync.schedule(process.env.DRIVE_SYNC_MINUTES);
-// Front-end files (website, admin panel, vendor + franchise portals) live in ../frontend. This server serves them when
-// that folder is next to it (local use, a VPS, Docker). When only backend/ is deployed (Render, with the front-end on
-// Vercel) the folder is absent and this server is API-only.
+
 const FRONTEND_DIR = path.join(__dirname, "..", "frontend");
 if (fs.existsSync(FRONTEND_DIR)) {
-  // The website sits at the root of frontend/, so /dashboard/, /vendor/ and /franchise/ are served by this one line.
   app.use(express.static(FRONTEND_DIR, { index: "index.html" }));
 } else {
   app.get("/", (req, res) =>
     res.json({ ok: true, service: "On The Way Logistics API", note: "The website is hosted separately." }),
   );
 }
-// Last stop for errors: a short JSON message, never a stack trace.
+
 app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
   const status = err.status || err.statusCode || 500;
   if (status >= 500) console.error("Server error:", err.message);
-  res
-    .status(status)
-    .json({
-      error:
-        err.type === "entity.parse.failed"
-          ? "The request was not valid."
-          : err.type === "entity.too.large"
-            ? "The request is too large."
-            : status >= 500
-              ? "Something went wrong on the server."
-              : "The request could not be completed.",
-    });
+  res.status(status).json({
+    error:
+      err.type === "entity.parse.failed"
+        ? "The request was not valid."
+        : err.type === "entity.too.large"
+          ? "The request is too large."
+          : status >= 500
+            ? "Something went wrong on the server."
+            : "The request could not be completed.",
+  });
 });
+
 app.listen(PORT, (err) => {
   if (err) {
-    // Without this the window said "running" while the browser was really talking to another copy (and its database).
     if (err.code === "EADDRINUSE")
       console.error(
         `\n  NOT STARTED: port ${PORT} is already in use. Another copy of this server is still running,` +
@@ -2695,8 +2752,7 @@ app.listen(PORT, (err) => {
     process.exit(1);
   }
   console.log(`On The Way Logistics (Version 12 · 15 Nov 2026) running on http://localhost:${PORT}`);
-  console.log(`  Database:      ${path.join(DATA_DIR, "payments.sqlite")}`);
-  // Tell the owner straight away whether Forgot password / support emails can be sent.
+  console.log(`  Database:      Supabase PostgreSQL (DATABASE_URL)`);
   mailStatus().then((m) =>
     console.log(
       (m.ready ? "  Email: " : "  Email NOT working: ") +
