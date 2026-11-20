@@ -3,15 +3,31 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-const ALLOWED_STATUSES = new Set([
+export const SUPPORT_PHOTO_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+
+export const SUPPORT_STATUSES = [
   "open",
   "in_progress",
   "waiting_on_user",
   "resolved",
   "closed",
-]);
+];
 
+const ALLOWED_STATUSES = new Set(SUPPORT_STATUSES);
 const ALLOWED_PRIORITIES = new Set(["low", "normal", "high", "urgent"]);
+
+export class SupportError extends Error {
+  constructor(message, status = 400) {
+    super(message);
+    this.name = "SupportError";
+    this.status = status;
+  }
+}
+
+export function partnerPortalType(role) {
+  const r = String(role || "").toLowerCase();
+  return r === "vendor" || r === "franchise" ? r : "";
+}
 
 export async function createSupportService({ db, uploadDir }) {
   const supportUploadRoot = path.join(uploadDir, "support-tickets");
@@ -207,7 +223,9 @@ export async function createSupportService({ db, uploadDir }) {
       .prepare("UPDATE support_tickets SET updated_at=? WHERE id=?")
       .run(createdAt, String(ticketId));
 
-    return db.prepare("SELECT * FROM support_ticket_events WHERE id=?").get(id);
+    return db
+      .prepare("SELECT * FROM support_ticket_events WHERE id=?")
+      .get(id);
   }
 
   async function createTicket({
@@ -224,7 +242,7 @@ export async function createSupportService({ db, uploadDir }) {
   }) {
     const cleanSubject = cleanText(subject, 240);
     if (!cleanSubject) {
-      throw new Error("Ticket subject is required.");
+      throw new SupportError("Ticket subject is required.", 400);
     }
 
     const normalizedPriority = ALLOWED_PRIORITIES.has(
@@ -302,7 +320,7 @@ export async function createSupportService({ db, uploadDir }) {
       .trim()
       .toLowerCase();
     if (!ALLOWED_STATUSES.has(normalized)) {
-      throw new Error("Invalid support ticket status.");
+      throw new SupportError("Invalid support ticket status.", 400);
     }
     const existing = await getTicketById(ticketId);
     if (!existing) return null;
