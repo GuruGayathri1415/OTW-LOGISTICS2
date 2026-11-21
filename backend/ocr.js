@@ -53,18 +53,24 @@ function getWorker() {
 // Matches "Partner ID: 28588592", "Rider ID - 123456", or standalone "ID: 8392252".
 const ID_RE =
   /(?:(?:partner|rider)\s*)?[i1l|]\s*d\s*(?:no\.?|number)?\s*[:;.\-]\s*([0-9OoIl|]{5,12})/i;
-const cleanDigits = (s) => s.replace(/[Oo]/g, "0").replace(/[Il|]/g, "1");
+const cleanDigits = (s) =>
+  String(s || "")
+    .replace(/[Oo]/g, "0")
+    .replace(/[Il|]/g, "1")
+    .replace(/[Ss]/g, "5")
+    .replace(/[Bb]/g, "8");
 
 const NOISE_NAME_RE =
   /^(?:my\s+profile|profile|personal\s+info|my\s+documents|shadowfax(?:\s+kit)?|terms(?:\s+and\s+conditions)?|whatsapp(?:\s+opt\s+in)?|sign\s+out|group(?:\s*[:\-].*)?|id(?:\s*[:\-].*)?)$/i;
 
-function extractMobile(lines) {
+function extractMobile(lines, partnerId = "") {
   for (const line of lines) {
-    const normalized = String(line || "").replace(/(?:\+91|91)[\s-]?/, "");
-    const m = normalized.match(/(?:^|[^\d])([6-9](?:[\s-]?\d){9})(?:[^\d]|$)/);
-    if (m) {
-      const digits = m[1].replace(/\D/g, "");
-      if (/^[6-9]\d{9}$/.test(digits)) return digits;
+    const normalized = cleanDigits(line).replace(/^(?:\+?91|0)[\s-]?/, "");
+    const m = normalized.match(/(?:^|[^\d])([6-9](?:[\s-]?[0-9]){9})(?:[^\d]|$)/);
+    if (!m) continue;
+    const digits = m[1].replace(/\D/g, "");
+    if (/^[6-9]\d{9}$/.test(digits) && digits !== partnerId) {
+      return digits;
     }
   }
   return "";
@@ -76,13 +82,14 @@ export function parseRiderText(text) {
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
-  const mobile = extractMobile(lines);
+
+  let partnerId = "";
+  let name = "";
 
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(ID_RE);
     if (!m) continue;
-    const partnerId = cleanDigits(m[1]);
-    let name = "";
+    partnerId = cleanDigits(m[1]);
     for (let j = i - 1; j >= 0 && j >= i - 3; j--) {
       const candidate = lines[j]
         .replace(/^[^A-Za-z]+|[^A-Za-z.]+$/g, "")
@@ -101,9 +108,11 @@ export function parseRiderText(text) {
         break;
       }
     }
-    return { partnerId, name, mobile };
+    break;
   }
-  return { partnerId: "", name: "", mobile };
+
+  const mobile = extractMobile(lines, partnerId);
+  return { partnerId, name, mobile };
 }
 
 async function recognise(buffer, psm) {
@@ -118,7 +127,14 @@ export function readRiderScreenshot(buffer) {
   const job = queue.then(async () => {
     // "Sparse text" reads app screens best; the general mode is a second try.
     let r = await recognise(buffer, PSM.SPARSE_TEXT);
-    if (!r.partnerId) r = await recognise(buffer, PSM.AUTO);
+    if (!r.partnerId || !r.mobile) {
+      const alt = await recognise(buffer, PSM.AUTO);
+      r = {
+        partnerId: r.partnerId || alt.partnerId,
+        name: r.name || alt.name,
+        mobile: r.mobile || alt.mobile,
+      };
+    }
     return r;
   });
   queue = job.catch(() => {});
