@@ -596,11 +596,22 @@ function render(page) {
 }
 window.render = render;
 
+function rrItemsArray() {
+  if (typeof rrItems === "undefined") return [];
+  if (Array.isArray(rrItems)) return rrItems;
+  if (Array.isArray(rrItems?.items)) return rrItems.items;
+  return [];
+}
+
+function rrPendingCount() {
+  return rrItemsArray().filter((r) => r && r.status === "PENDING").length;
+}
+
 function dashboard() {
   const active = db.riders.filter((r) => r.status === "Active").length;
   const activeHubs = db.hubs.filter((h) => h.status !== "Inactive").length;
   const totalHubs = db.hubs.length;
-  const pendingCount = typeof rrPendingCount === "function" ? rrPendingCount() : 0;
+  const pendingCount = rrPendingCount();
   const ws = dashboardWeeklyStats();
   const fmtN = (n) => Number(n || 0).toLocaleString("en-IN");
   const rupees = (n) =>
@@ -864,9 +875,8 @@ function bindRiders() {
 function paintPendingRiders() {
   const card = $("#riderPendingCard");
   if (!card) return;
-  const items = typeof rrItems !== "undefined" && Array.isArray(rrItems) ? rrItems : [];
-  const list = items
-    .filter((r) => r.status === "PENDING")
+  const list = rrItemsArray()
+    .filter((r) => r && r.status === "PENDING")
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
   card.classList.toggle("hidden", !list.length);
   if (!list.length) return (card.innerHTML = "");
@@ -874,7 +884,7 @@ function paintPendingRiders() {
   card.innerHTML = `<div class="section-head"><div><h3>⏳ Waiting for approval (${list.length})</h3><p class="muted">${fromPartners ? `${fromPartners} added by Vendors / Franchises. ` : ""}Approve a rider to move them into the Riders list below; Reject needs a reason.</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Rider ID</th><th>Rider Name</th><th>Mobile Number</th><th>Hub Pincode</th><th>Hub Location</th><th>Selfie</th><th>Aadhaar</th><th>Added By</th><th>Added On</th><th>Status</th><th>Action</th></tr></thead><tbody>${list.map(rrRow).join("")}</tbody></table></div>`;
 }
 function updateRiderNavCount() {
-  const n = typeof rrPendingCount === "function" ? rrPendingCount() : 0;
+  const n = rrPendingCount();
   const btn = document.querySelector('.nav[data-page="riders"]');
   if (!btn) return;
   let b = btn.querySelector(".nav-count");
@@ -945,7 +955,7 @@ async function syncRiderMasterDirectory() {
       const registrationResponse = await rrCall(rrApiUrl());
       rrItems = registrationResponse.items || [];
       for (const master of matched) {
-        const regMatches = (rrItems || []).filter(
+        const regMatches = rrItemsArray().filter(
           (x) =>
             normRiderMasterName(x.riderName) ===
             normRiderMasterName(master.name),
@@ -965,7 +975,7 @@ async function syncRiderMasterDirectory() {
           method: "PUT",
           body: fd,
         });
-        rrItems = rrItems.map((x) => (x.id === reg.id ? out.item : x));
+        rrItems = rrItemsArray().map((x) => (x.id === reg.id ? out.item : x));
         remoteChanged++;
       }
     } catch (e) {
@@ -1071,7 +1081,7 @@ function riderEditModal(r, reg = null) {
       if (savedRegistration)
         rrItems = [
           savedRegistration,
-          ...rrItems.filter((x) => x.id !== savedRegistration.id),
+          ...rrItemsArray().filter((x) => x.id !== savedRegistration.id),
         ];
       const oldName = r.name;
       Object.assign(r, {
@@ -1113,10 +1123,10 @@ window.editRider = async (id) => {
   const r = db.riders.find((x) => String(x.id) === String(id));
   if (!r) return toast("Rider not found.");
   try {
-    await rrLoad({ quiet: true });
+    if (typeof rrLoad === "function") await rrLoad({ quiet: true });
   } catch (e) {}
   const byName = normRiderMasterName(r.name);
-  const reg = (rrItems || []).find(
+  const reg = rrItemsArray().find(
     (x) =>
       normRiderMasterName(x.riderName) === byName ||
       String(x.riderId) === String(r.id),
@@ -1158,7 +1168,7 @@ window.viewRider = async (id) => {
       loadAdminDocs(),
     ]);
     registration =
-      (rrItems || []).find(
+      rrItemsArray().find(
         (x) => normalizeRiderLinkId(x.riderId) === riderKey,
       ) || null;
   } catch (e) {}
@@ -1182,9 +1192,10 @@ window.viewRider = async (id) => {
   const docs = docsOfRider(r);
   const total = weekly.reduce((n, x) => n + Number(x.amount || 0), 0),
     dailyTotal = daily.reduce((n, x) => n + Number(x.amount || 0), 0);
-  const badgeHtml = typeof rrStatusBadge === "function"
-    ? rrStatusBadge(registration?.status)
-    : esc(registration?.status || "");
+  const badgeHtml =
+    typeof rrStatusBadge === "function"
+      ? rrStatusBadge(registration?.status)
+      : esc(registration?.status || "");
   const docLinks = registration
     ? `<div class="rr-doc-buttons"><button type="button" class="btn-sm" id="profileSelfie">View rider selfie / screenshot</button><button type="button" class="btn-sm" id="profileAadhaar">Preview Aadhaar</button></div><p class="hint">Registration status: ${badgeHtml} · Secure documents are available to signed-in admins.</p>`
     : '<p class="hint">No secure registration documents are linked to this Rider ID yet.</p>';
@@ -1257,7 +1268,7 @@ async function loadAdminDocs() {
     const out = await r.json().catch(() => ({}));
     if (!r.ok)
       throw new Error(out.error || "Request failed (" + r.status + ")");
-    adminDocs = out.items || [];
+    adminDocs = Array.isArray(out.items) ? out.items : [];
     adminDocsLoaded = true;
   } catch (e) {
     toast("Could not load rider documents: " + e.message);
@@ -1265,13 +1276,14 @@ async function loadAdminDocs() {
 }
 function docsOfRider(r) {
   const key = normalizeRiderLinkId(r.id);
-  const server = adminDocs
-    .filter((d) => normalizeRiderLinkId(d.riderId) === key)
+  const docsList = Array.isArray(adminDocs) ? adminDocs : [];
+  const server = docsList
+    .filter((d) => d && normalizeRiderLinkId(d.riderId) === key)
     .map((d) => ({
       id: d.id,
       type: d.type,
       file: d.name,
-      date: new Date(d.createdAt).toLocaleDateString("en-IN"),
+      date: d.createdAt ? new Date(d.createdAt).toLocaleDateString("en-IN") : "",
       server: true,
     }));
   const legacy = (db.documents || [])
@@ -1320,10 +1332,11 @@ function documentSections() {
   const raw = String(docSearch.query || "")
     .trim()
     .toLowerCase();
-  if (!raw) return db.riders.map((r) => ({ r, docs: docsOfRider(r) }));
+  const ridersList = Array.isArray(db.riders) ? db.riders : [];
+  if (!raw) return ridersList.map((r) => ({ r, docs: docsOfRider(r) }));
   const q = normText(raw),
     out = [];
-  db.riders.forEach((r) => {
+  ridersList.forEach((r) => {
     const all = docsOfRider(r);
     if (docRiderMatches(r, raw, q)) out.push({ r, docs: all });
     else {
@@ -1335,13 +1348,13 @@ function documentSections() {
 }
 function documentsListHtml() {
   const secs = documentSections();
-  const regs = typeof rrItems !== "undefined" && Array.isArray(rrItems) ? rrItems : [];
+  const regs = rrItemsArray();
   if (!secs.length)
-    return `<div class="empty" style="padding:18px 0">${docSearch.query.trim() ? "No matching riders or documents found" : "No riders yet."}</div>`;
+    return `<div class="empty" style="padding:18px 0">${String(docSearch.query || "").trim() ? "No matching riders or documents found" : "No riders yet."}</div>`;
   return secs
     .map(({ r, docs }) => {
       const reg = regs.find(
-        (x) => normalizeRiderLinkId(x.riderId) === normalizeRiderLinkId(r.id),
+        (x) => x && normalizeRiderLinkId(x.riderId) === normalizeRiderLinkId(r.id),
       );
       const extra = reg
         ? `<div class="uploaded-doc"><span><b>Rider Selfie / Screenshot</b> • ${esc(reg.selfie?.name || "Secure file")}</span><button class="btn-sm" data-reg-doc="selfie" data-reg-id="${esc(reg.id)}" data-reg-name="${esc(r.name)}">View</button></div><div class="uploaded-doc"><span><b>Aadhaar Card</b> • ${esc(reg.aadhaar?.name || "Secure file")}</span><button class="btn-sm" data-reg-doc="aadhaar" data-reg-id="${esc(reg.id)}" data-reg-name="${esc(r.name)}">Preview</button></div>`
@@ -1365,7 +1378,7 @@ const DOC_UPLOAD_TYPES = [
 const DOC_FILE_EXT = [".jpg", ".jpeg", ".png", ".webp", ".pdf"];
 const SELFIE_FILE_EXT = [".jpg", ".jpeg", ".png", ".webp"];
 const DOC_MAX_UPLOAD = 5 * 1024 * 1024;
-const docDate = (iso) => new Date(iso).toLocaleDateString("en-IN");
+const docDate = (iso) => (iso ? new Date(iso).toLocaleDateString("en-IN") : "");
 function docMatchesSearch(hay, raw, q) {
   return hay.includes(raw) || (q && normText(hay).includes(q));
 }
@@ -1374,7 +1387,9 @@ function uploadedDocsRows() {
     .trim()
     .toLowerCase();
   const q = normText(raw);
-  return adminDocs.filter((d) => {
+  const docsList = Array.isArray(adminDocs) ? adminDocs : [];
+  return docsList.filter((d) => {
+    if (!d) return false;
     if (!raw) return true;
     const hay = [
       d.riderName,
@@ -1403,7 +1418,7 @@ function uploadedDocsTableHtml() {
             `<td class="doc-actions"><button type="button" class="btn-sm" onclick="viewDoc('${esc(d.id)}')">View</button> <button type="button" class="btn-sm" onclick="downloadDoc('${esc(d.id)}')">Download</button> <button type="button" class="btn-sm" onclick="openDocumentForm({replaceId:'${esc(d.id)}'})">Replace</button> <button type="button" class="btn-sm danger" onclick="deleteDoc('${esc(d.id)}')">Delete</button></td></tr>`,
         )
         .join("")
-    : `<tr><td colspan="7" class="empty">${docSearch.query.trim() ? "No matching documents found" : "No documents uploaded yet. Use + Upload Rider Document to add one."}</td></tr>`;
+    : `<tr><td colspan="7" class="empty">${String(docSearch.query || "").trim() ? "No matching documents found" : "No documents uploaded yet. Use + Upload Rider Document to add one."}</td></tr>`;
   return `<div class="card doc-table-card"><div class="section-head"><div><h3>Uploaded documents</h3><p class="muted">Each file is saved against its Rider ID. Files open only for signed-in admins.</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Rider Name</th><th>Rider ID</th><th>Document Type</th><th>File Name</th><th>Rider Selfie / Screenshot</th><th>Upload Date</th><th>Actions</th></tr></thead><tbody>${body}</tbody></table></div></div>`;
 }
 function documents() {
@@ -1442,8 +1457,7 @@ function bindDocuments() {
   $("#documentsList")?.addEventListener("click", (e) => {
     const b = e.target.closest("[data-reg-doc]");
     if (!b) return;
-    const regs = typeof rrItems !== "undefined" && Array.isArray(rrItems) ? rrItems : [];
-    const reg = regs.find((x) => x.id === b.dataset.regId);
+    const reg = rrItemsArray().find((x) => x.id === b.dataset.regId);
     if (reg)
       rrOpenDocument(
         reg.id,
@@ -2378,7 +2392,7 @@ function partnerRiderGroups(list) {
   if (!window.PartnerRiders) return [];
   return PartnerRiders.ridersByPartner(
     list,
-    typeof rrItems !== "undefined" ? rrItems : [],
+    rrItemsArray(),
     weeklyStore.rows || [],
   );
 }
@@ -3201,7 +3215,7 @@ function exportExcel() {
         d.riderName || d.riderId,
         d.type,
         d.name,
-        new Date(d.createdAt).toLocaleDateString("en-IN"),
+        d.createdAt ? new Date(d.createdAt).toLocaleDateString("en-IN") : "",
       ]),
       ...db.documents.map((d) => [d.rider, d.type, d.file, d.date]),
     ],
@@ -4248,7 +4262,7 @@ function syncRegisteredRiders() {
     String(v ?? "")
       .trim()
       .toLowerCase();
-  for (const reg of rrItems || []) {
+  for (const reg of rrItemsArray()) {
     const rid = String(reg.riderId || "").trim();
     if (!rid || db.hiddenRegistrations.includes(reg.id)) continue;
     let r =
@@ -4323,12 +4337,9 @@ function syncRegisteredRiders() {
   }
   return changed;
 }
-function rrPendingCount() {
-  return (rrItems || []).filter((r) => r.status === "PENDING").length;
-}
 let rrKnownPending = null;
 function announceNewPartnerRiders() {
-  const pending = (rrItems || []).filter((r) => r.status === "PENDING");
+  const pending = rrItemsArray().filter((r) => r && r.status === "PENDING");
   const fresh = rrKnownPending
     ? pending.filter((r) => !rrKnownPending.has(r.id) && r.ownerLoginId)
     : [];
@@ -4346,7 +4357,7 @@ async function rrLoad({ quiet = false } = {}) {
   try {
     const out = await rrCall(rrApiUrl());
     const before = rrPendingCount();
-    rrItems = out.items || [];
+    rrItems = Array.isArray(out.items) ? out.items : [];
     announceNewPartnerRiders();
     rrRender();
     if (
@@ -4383,9 +4394,10 @@ function rrRender() {
   paintPendingRiders();
   const body = document.getElementById("regRows");
   if (!body) return;
-  const count = (s) => rrItems.filter((r) => r.status === s).length;
+  const items = rrItemsArray();
+  const count = (s) => items.filter((r) => r && r.status === s).length;
   const stats = {
-    regStatTotal: rrItems.length,
+    regStatTotal: items.length,
     regStatPending: count("PENDING"),
     regStatApproved: count("APPROVED"),
     regStatRejected: count("REJECTED"),
@@ -4395,17 +4407,18 @@ function rrRender() {
     if (el) el.textContent = stats[k];
   }
   const f = rrFilters();
-  const list = rrItems.filter(
+  const list = items.filter(
     (r) =>
-      (!f.id || r.riderId.toLowerCase().includes(f.id)) &&
-      (!f.name || r.riderName.toLowerCase().includes(f.name)) &&
-      (!f.hub || r.hubLocation.toLowerCase().includes(f.hub)) &&
+      r &&
+      (!f.id || String(r.riderId || "").toLowerCase().includes(f.id)) &&
+      (!f.name || String(r.riderName || "").toLowerCase().includes(f.name)) &&
+      (!f.hub || String(r.hubLocation || "").toLowerCase().includes(f.hub)) &&
       (!f.status || r.status === f.status),
   );
   body.innerHTML = list.map(rrRow).join("");
   const empty = document.getElementById("regEmpty");
   if (empty) {
-    empty.textContent = rrItems.length
+    empty.textContent = items.length
       ? "No rider registrations match these filters."
       : "No rider registrations yet. Use “+ Add New Member” on the Riders page to register one.";
     empty.classList.toggle("hidden", list.length > 0);
@@ -4453,7 +4466,7 @@ function rrBindClientPage() {
 function rrTableClick(e) {
   const b = e.target.closest("button[data-rr-act],button[data-rr-doc]");
   if (!b) return;
-  const item = rrItems.find((x) => x.id === b.dataset.rrId);
+  const item = rrItemsArray().find((x) => x.id === b.dataset.rrId);
   if (!item) return;
   if (b.dataset.rrDoc)
     return rrOpenDocument(
@@ -4525,7 +4538,7 @@ function rrConfirmDecision(item, status) {
         rrApiUrl("/" + encodeURIComponent(item.id) + "/status"),
         { method: "POST", body: { status, remarks } },
       );
-      rrItems = rrItems.map((x) => (x.id === item.id ? out.item : x));
+      rrItems = rrItemsArray().map((x) => (x.id === item.id ? out.item : x));
       closeModal();
       rrRender();
       if (!syncRegisteredRiders() && currentPage === "riders") paintRiders();
@@ -4541,7 +4554,7 @@ function rrConfirmDecision(item, status) {
 async function rrViewDetail(id) {
   try {
     const r = (await rrCall(rrApiUrl("/" + encodeURIComponent(id)))).item;
-    rrItems = rrItems.map((x) => (x.id === r.id ? r : x));
+    rrItems = rrItemsArray().map((x) => (x.id === r.id ? r : x));
     const history = (r.history || [])
       .map(
         (h) =>
@@ -4721,7 +4734,7 @@ async function rrSubmitForm(e) {
   btn.textContent = "Saving…";
   try {
     const out = await rrCall(rrApiUrl(), { method: "POST", body: fd });
-    rrItems = [out.item, ...rrItems.filter((x) => x.id !== out.item.id)];
+    rrItems = [out.item, ...rrItemsArray().filter((x) => x.id !== out.item.id)];
     closeModal();
     toast(
       `${out.item.applicationId} saved as PENDING. Showing in Client Members.`,
