@@ -6,7 +6,10 @@
 const esc = (v) =>
   String(v ?? "").replace(
     /[&<>"']/g,
-    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
   );
 const oneLine = (v) =>
   String(v ?? "")
@@ -19,18 +22,27 @@ const dateText = (iso) => {
   const d = new Date(iso || Date.now());
   return isNaN(d)
     ? ""
-    : d.toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" });
+    : d.toLocaleDateString("en-IN", {
+        day: "2-digit",
+        month: "long",
+        year: "numeric",
+      });
 };
 
 // The application details repeated back to the applicant (only fields they filled in).
 function detailRows(app) {
-  const place = [app.locality, app.city, app.district, app.state].filter(Boolean).join(", ");
+  const place = [app.locality, app.city, app.district, app.state]
+    .filter(Boolean)
+    .join(", ");
   return [
     ["Application ID", app.appId],
     ["Application type", kindOf(app)],
     ["Name", app.name],
     ["Mobile number", app.mobile],
-    ["WhatsApp number", app.whatsapp && app.whatsapp !== app.mobile ? app.whatsapp : ""],
+    [
+      "WhatsApp number",
+      app.whatsapp && app.whatsapp !== app.mobile ? app.whatsapp : "",
+    ],
     ["Email", app.email],
     ["Location", place],
     ["PIN code", app.pincode],
@@ -38,15 +50,27 @@ function detailRows(app) {
 }
 
 // Plain layout that reads well in Gmail on a phone: a header, the message paragraphs, an optional box, a footer.
-function layout({ title, paragraphs, box = null, rows = null, footerNote, supportEmail }) {
+function layout({
+  title,
+  paragraphs,
+  box = null,
+  rows = null,
+  footerNote = "",
+  signOffLines = ["Regards,", "On The Way Logistics"],
+  supportEmail = "",
+}) {
   const text = [
     ...paragraphs.flatMap((p) => [p, ""]),
     ...(box ? [...box.map(([k, v]) => `  ${k}: ${oneLine(v)}`), ""] : []),
-    ...(rows ? ["Your application:", ...rows.map(([k, v]) => `  ${k}: ${oneLine(v)}`), ""] : []),
-    footerNote,
-    "",
-    "Regards,",
-    "On The Way Logistics",
+    ...(rows
+      ? [
+          "Your application:",
+          ...rows.map(([k, v]) => `  ${k}: ${oneLine(v)}`),
+          "",
+        ]
+      : []),
+    ...(footerNote ? [footerNote, ""] : []),
+    ...signOffLines,
     supportEmail ? `Help: ${supportEmail}` : "",
   ]
     .join("\n")
@@ -58,6 +82,11 @@ function layout({ title, paragraphs, box = null, rows = null, footerNote, suppor
           `<tr><td style="padding:8px 12px;color:#5b6b7d;font-size:13px;width:42%;border-bottom:1px solid #e6eef5">${esc(k)}</td><td style="padding:8px 12px;font-size:14px;color:#14263b;border-bottom:1px solid #e6eef5;${strong ? "font-weight:700;font-family:Consolas,Menlo,monospace" : "font-weight:600"}">${esc(oneLine(v))}</td></tr>`,
       )
       .join("")}</table>`;
+  const signOffHtml = signOffLines
+    .map((line, idx) =>
+      idx === 0 ? esc(line) : `<strong>${esc(line)}</strong>`,
+    )
+    .join("<br>");
   const html = `<!doctype html><html><body style="margin:0;padding:0;background:#eef3f8">
 <div style="max-width:560px;margin:0 auto;padding:16px;font-family:Arial,Helvetica,sans-serif;color:#14263b">
 <div style="background:#0b2a4a;color:#fff;padding:14px 18px;border-radius:10px 10px 0 0"><strong style="font-size:16px;letter-spacing:.5px">ON THE WAY LOGISTICS</strong><div style="color:#f5a623;font-size:12px;margin-top:2px">Delivering trust, every mile</div></div>
@@ -65,8 +94,8 @@ function layout({ title, paragraphs, box = null, rows = null, footerNote, suppor
 <h1 style="font-size:19px;margin:0 0 12px">${esc(title)}</h1>
 ${paragraphs.map((p) => `<p style="font-size:14px;line-height:1.55;margin:0 0 12px">${esc(p)}</p>`).join("")}
 ${box ? table(box, true) : ""}${rows ? `<p style="font-size:13px;color:#5b6b7d;margin:16px 0 0">Your application</p>${table(rows, false)}` : ""}
-<p style="font-size:13px;line-height:1.5;color:#5b6b7d;margin:14px 0 0">${esc(footerNote)}</p>
-<p style="font-size:14px;margin:16px 0 0">Regards,<br><strong>On The Way Logistics</strong>${supportEmail ? `<br><span style="font-size:13px;color:#5b6b7d">Help: ${esc(supportEmail)}</span>` : ""}</p>
+${footerNote ? `<p style="font-size:13px;line-height:1.5;color:#5b6b7d;margin:14px 0 0">${esc(footerNote)}</p>` : ""}
+<p style="font-size:14px;line-height:1.55;margin:16px 0 0">${signOffHtml}${supportEmail ? `<br><span style="font-size:13px;color:#5b6b7d">Help: ${esc(supportEmail)}</span>` : ""}</p>
 </div></div></body></html>`;
   return { text, html };
 }
@@ -85,20 +114,40 @@ export function submittedEmail(app, { supportEmail = "" } = {}) {
       "If any detail above is wrong, reply to this email with the correction and your application ID. If you did not submit this application, please ignore this email.",
     supportEmail,
   });
-  return { subject: `Application received: ${oneLine(app.appId)} (${kind})`, text, html };
+  return {
+    subject: `Application received: ${oneLine(app.appId)} (${kind})`,
+    text,
+    html,
+  };
 }
 
 // login: {portalUrl, loginId, password} - password is "" when an existing login is switched back on.
-export function approvedEmail(app, { login = null, note = "", supportEmail = "" } = {}) {
-  const kind = kindOf(app);
+export function approvedEmail(
+  app,
+  { login = null, note = "", supportEmail = "" } = {},
+) {
+  const isVendor = String(app?.type || "").toLowerCase() === "vendor";
+  const kind = isVendor ? "Vendor" : "Franchise";
+  const lowerKind = isVendor ? "vendor" : "franchise";
+
   const paragraphs = [
-    `Dear ${oneLine(app.name) || "partner"},`,
-    `Congratulations! Your ${kind.toLowerCase()} application ${app.appId} has been approved. Welcome to On The Way Logistics.`,
+    `Dear ${kind},`,
+    "Greetings from OnTheWay Logistics!",
+    `We are pleased to inform you that your ${lowerKind} application has been reviewed and approved by our team.`,
+    `We welcome you as an approved ${lowerKind} of OnTheWay Logistics and look forward to building a successful business relationship.`,
+    "Kindly coordinate with our team for the next steps, onboarding formalities, and operational requirements.",
+    "We appreciate your interest in working with us and look forward to a long-term association.",
   ];
-  if (oneLine(note)) paragraphs.push(`Message from our team: ${oneLine(note)}`);
+
+  if (oneLine(note)) {
+    paragraphs.push(`Note from our team: ${oneLine(note)}`);
+  }
+
   let box = null;
   if (login && login.password) {
-    paragraphs.push(`You can now sign in to the ${kind} Portal with these details:`);
+    paragraphs.push(
+      `You can now sign in to the ${kind} Portal with these details:`,
+    );
     box = [
       ["Portal", login.portalUrl],
       [`${kind} ID`, login.loginId],
@@ -106,24 +155,37 @@ export function approvedEmail(app, { login = null, note = "", supportEmail = "" 
     ];
   } else if (login) {
     paragraphs.push(
-      `Your ${kind} Portal login works again. Sign in with your ${kind} ID and the password you chose before:`,
+      `Your ${kind} Portal login is active. Sign in with your ${kind} ID and your existing password:`,
     );
     box = [
       ["Portal", login.portalUrl],
       [`${kind} ID`, login.loginId],
     ];
   }
+
   const { text, html } = layout({
-    title: "Application approved",
+    title: `${kind} Application Approved`,
     paragraphs,
     box,
     footerNote:
       login && login.password
         ? "When you sign in for the first time you will be asked to choose your own password. Do not share these details with anyone."
-        : "Do not share your password with anyone.",
+        : login
+          ? "Do not share your password with anyone."
+          : "",
+    signOffLines: [
+      "Best Regards,",
+      `${kind} Management Team`,
+      "OnTheWay Logistics",
+    ],
     supportEmail,
   });
-  return { subject: `Application approved: ${oneLine(app.appId)} (${kind})`, text, html };
+
+  return {
+    subject: `${kind} Application Approved: ${oneLine(app.appId)} - OnTheWay Logistics`,
+    text,
+    html,
+  };
 }
 
 export function rejectedEmail(app, { note = "", supportEmail = "" } = {}) {
@@ -140,10 +202,15 @@ export function rejectedEmail(app, { note = "", supportEmail = "" } = {}) {
   const { text, html } = layout({
     title: "Application update",
     paragraphs,
-    footerNote: "If you have questions about this decision, reply to this email with your application ID.",
+    footerNote:
+      "If you have questions about this decision, reply to this email with your application ID.",
     supportEmail,
   });
-  return { subject: `Application update: ${oneLine(app.appId)} (${kind})`, text, html };
+  return {
+    subject: `Application update: ${oneLine(app.appId)} (${kind})`,
+    text,
+    html,
+  };
 }
 
 // Admin "Reset password" / "Create login" for a partner whose application was already approved.
@@ -164,5 +231,9 @@ export function newPasswordEmail(app, { login, supportEmail = "" } = {}) {
       "You will be asked to choose your own password when you sign in. If you did not ask for this, contact us. Do not share these details with anyone.",
     supportEmail,
   });
-  return { subject: `Your On The Way Logistics ${kind} Portal login`, text, html };
+  return {
+    subject: `Your On The Way Logistics ${kind} Portal login`,
+    text,
+    html,
+  };
 }
