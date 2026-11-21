@@ -60,6 +60,7 @@ const $ = (s) => document.querySelector(s),
 let currentUser = null;
 function toast(m) {
   const t = $("#toast");
+  if (!t) return;
   t.textContent = m;
   t.classList.add("show");
   setTimeout(() => t.classList.remove("show"), 2400);
@@ -100,6 +101,7 @@ function showApp() {
     history.replaceState(null, "", location.pathname);
   startPartnerPolling();
   startSupportAlertPolling();
+  loadWeeklyPayments();
   initHubs().catch(() => {});
   checkPasswordHelpRequests();
 }
@@ -185,31 +187,20 @@ async function checkSupportTicketsAlert({ notifyOnIncrease = true } = {}) {
         ? "http://localhost:8080"
         : location.origin);
 
-    const endpoints = [
-      `${base}/api/admin/support`,
-      `${base}/api/support/tickets`,
-    ];
-    let payload = null;
+    const r = await fetch(`${base}/api/admin/support/tickets`, {
+      credentials: "include",
+      cache: "no-store",
+    });
+    if (r.status === 401) return sessionEnded();
+    if (!r.ok) return;
 
-    for (const url of endpoints) {
-      const r = await fetch(url, {
-        credentials: "include",
-        cache: "no-store",
-      });
-      if (r.status === 401) return sessionEnded();
-      if (r.ok) {
-        payload = await r.json().catch(() => ({}));
-        break;
-      }
-    }
-    if (!payload) return;
-
+    const payload = await r.json().catch(() => ({}));
     const list = Array.isArray(payload)
       ? payload
       : payload.tickets || payload.items || payload.rows || [];
 
     const openCount = list.filter((t) => {
-      const st = String(t.status || t.ticketStatus || "New")
+      const st = String(t.status || t.ticketStatus || "open")
         .trim()
         .toLowerCase();
       return st !== "resolved" && st !== "closed";
@@ -255,6 +246,7 @@ $$(".password-toggle").forEach(
   (b) =>
     (b.onclick = () => {
       const i = document.getElementById(b.dataset.target);
+      if (!i) return;
       i.type = i.type === "password" ? "text" : "password";
       b.textContent = i.type === "password" ? "Show" : "Hide";
     }),
@@ -372,7 +364,6 @@ $("#logoutBtn").onclick = async () => {
   currentUser = null;
   showAuth();
 };
-// Called when the server says the session has ended (signed out elsewhere, expired, password changed).
 function sessionEnded() {
   if (!currentUser) return;
   stopPartnerPolling();
@@ -383,10 +374,6 @@ function sessionEnded() {
   showAuth();
   toast("Your session has ended. Please sign in again.");
 }
-// Stay signed in across page reloads.
-// ---------- Forgot / reset password by email ----------
-// The emailed link opens this page as /dashboard/#reset=TOKEN. The token is read once, kept in memory only,
-// and removed from the address bar so it is not left in the history.
 let resetToken = "";
 function takeResetLink() {
   const m = location.hash.match(/^#reset=([A-Za-z0-9_-]{20,})$/);
@@ -396,7 +383,6 @@ function takeResetLink() {
   return true;
 }
 takeResetLink();
-// A link opened while this page is already showing (same tab) changes only the #part, so the page reacts to it here.
 window.addEventListener("hashchange", () => {
   if (takeResetLink()) showResetForm();
 });
@@ -406,8 +392,6 @@ function showSignInForm() {
   );
   $("#loginForm").classList.remove("hidden");
 }
-// When reset emails cannot be sent (not set up, or wrong settings in backend/.env), the request goes to the Super
-// Admin instead, who can give a temporary password from Settings > Admin Accounts.
 let forgotByEmail = true;
 function setForgotMode(byEmail) {
   forgotByEmail = byEmail;
@@ -439,7 +423,7 @@ function showResetForm() {
   $("#app").classList.add("hidden");
   $("#authLoginRegister").classList.remove("hidden");
   ["#loginForm", "#forgotForm", "#setPasswordForm"].forEach((id) =>
-    $(id).classList.add("hidden"),
+    $(id)?.classList.add("hidden"),
   );
   $("#resetForm").classList.remove("hidden");
   $("#resetMessage").textContent = "";
@@ -448,14 +432,15 @@ function showResetForm() {
   $("#resetNew").focus();
 }
 ["#resetNew", "#resetConfirm"].forEach((id) =>
-  $(id).addEventListener("input", () => ($("#resetMessage").textContent = "")),
+  $(id)?.addEventListener("input", () => ($("#resetMessage").textContent = "")),
 );
-$("#forgotLink").onclick = showForgotForm;
-$("#forgotBack").onclick = showSignInForm;
-$("#resetCancel").onclick = () => {
-  resetToken = "";
-  showSignInForm();
-};
+if ($("#forgotLink")) $("#forgotLink").onclick = showForgotForm;
+if ($("#forgotBack")) $("#forgotBack").onclick = showSignInForm;
+if ($("#resetCancel"))
+  $("#resetCancel").onclick = () => {
+    resetToken = "";
+    showSignInForm();
+  };
 let forgotTimer = null;
 $("#forgotForm").onsubmit = async (e) => {
   e.preventDefault();
@@ -483,7 +468,6 @@ $("#forgotForm").onsubmit = async (e) => {
     if (out.mode) setForgotMode(out.mode === "email");
     msg.classList.add("success");
     msg.textContent = out.message;
-    // A short wait stops repeated taps from sending repeated emails.
     let wait = 60;
     btn.textContent = `Wait ${wait}s`;
     clearInterval(forgotTimer);
@@ -535,7 +519,6 @@ $("#resetForm").onsubmit = async (e) => {
     btn.disabled = false;
   }
 };
-// Opened from a reset link: show the new-password form. Otherwise restore an existing admin sign-in, if any.
 if (resetToken) {
   showResetForm();
 } else {
@@ -550,12 +533,12 @@ if (resetToken) {
   })();
 }
 
-$("#menuBtn").onclick = () => $("#sidebar").classList.toggle("open");
+if ($("#menuBtn")) $("#menuBtn").onclick = () => $("#sidebar")?.classList.toggle("open");
 $$(".nav").forEach(
   (n) =>
     (n.onclick = () => {
       render(n.dataset.page);
-      $("#sidebar").classList.remove("open");
+      $("#sidebar")?.classList.remove("open");
     }),
 );
 
@@ -572,39 +555,49 @@ function render(page) {
     dashboard: dashboard,
     riders: riders,
     hub: hub,
-    support: supportManagement,
+    support: typeof supportManagement === "function" ? supportManagement : null,
     client: client,
     documents: documents,
     payments: payments,
     whatsapp: whatsapp,
     partners: partners,
-    notifications: notificationsPage,
+    notifications: typeof notificationsPage === "function" ? notificationsPage : null,
     reports: reports,
     settings: settings,
   };
   $$(".nav").forEach((n) =>
     n.classList.toggle("active", n.dataset.page === page),
   );
-  $("#content").innerHTML = (map[page] || dashboard)();
+  const viewFn = map[page] || dashboard;
+  const contentEl = $("#content");
+  if (!contentEl) return;
+  try {
+    contentEl.innerHTML = viewFn();
+  } catch (err) {
+    console.error(`Render error on page "${page}":`, err);
+    contentEl.innerHTML = `<div class="card"><div class="empty">Could not display ${esc(page)} right now. Try refreshing.</div></div>`;
+    return;
+  }
   if (page === "dashboard") bindDashboard();
   if (page === "riders") bindRiders();
   if (page === "hub") bindHubs();
-  if (page === "support") bindSupport();
+  if (page === "support" && typeof bindSupport === "function") bindSupport();
   if (page === "client") bindClient();
   if (page === "documents") bindDocuments();
   if (page === "payments") bindPayments();
   if (page === "whatsapp") bindWhatsApp();
   if (page === "partners") bindPartners();
   if (page === "settings") bindSettings();
-  if (page === "notifications") bindNotifications();
+  if (page === "notifications" && typeof bindNotifications === "function") bindNotifications();
   if (page === "reports") bindReports();
   if (typeof updatePartnerNavCount === "function") updatePartnerNavCount();
   if (supportAlertOpenCount > 0)
     updateSupportNavRedAlert(supportAlertOpenCount);
 }
+window.render = render;
+
 function dashboard() {
   const active = db.riders.filter((r) => r.status === "Active").length;
-  const inactive = Math.max(0, db.riders.length - active);
   const activeHubs = db.hubs.filter((h) => h.status !== "Inactive").length;
   const totalHubs = db.hubs.length;
   const ws = dashboardWeeklyStats();
@@ -759,10 +752,6 @@ function dashIcon(label) {
 function dashStat(label, value, sub, tone) {
   return `<div class="dash-stat ${tone}"><div class="dash-stat-icon">${dashIcon(label)}</div><div class="dash-label">${label}</div><div class="dash-value">${value}</div><div class="dash-sub">${sub}</div></div>`;
 }
-function orderBar(label, value, total) {
-  const pct = total ? Math.round((value / total) * 100) : 0;
-  return `<div class="order-item"><div class="order-label"><span>${label}</span><b>${value}</b></div><div class="order-track"><div class="order-fill" style="width:${pct}%"></div></div></div>`;
-}
 function bindDashboard() {
   $$("[data-go]").forEach((b) => (b.onclick = () => render(b.dataset.go)));
   $("#dashboardRefresh")?.addEventListener("click", async () => {
@@ -770,6 +759,7 @@ function bindDashboard() {
     await Promise.all([
       loadWeeklyPayments(),
       rrLoad({ quiet: true }),
+      typeof loadHubs === "function" ? loadHubs({ quiet: true }) : Promise.resolve(true),
       checkSupportTicketsAlert({ notifyOnIncrease: false }),
     ]);
     if (currentPage === "dashboard") render("dashboard");
@@ -1423,15 +1413,17 @@ function bindDocuments() {
     clr = $("#docSearchClear");
   if (!inp) return;
   const paint = () => {
-    $("#docUploadTable").innerHTML = uploadedDocsTableHtml();
-    $("#documentsList").innerHTML = documentsListHtml();
-    clr.style.display = docSearch.query ? "block" : "none";
+    if ($("#docUploadTable"))
+      $("#docUploadTable").innerHTML = uploadedDocsTableHtml();
+    if ($("#documentsList"))
+      $("#documentsList").innerHTML = documentsListHtml();
+    if (clr) clr.style.display = docSearch.query ? "block" : "none";
   };
   inp.addEventListener("input", () => {
     docSearch.query = inp.value;
     paint();
   });
-  clr.addEventListener("click", () => {
+  clr?.addEventListener("click", () => {
     docSearch.query = "";
     inp.value = "";
     paint();
@@ -1868,240 +1860,6 @@ function weekLabel(start) {
     x.getFullYear();
   return f(d) + " - " + f(e);
 }
-function weeklyPaymentSummary() {
-  const map = new Map();
-  db.payments.forEach((p) => {
-    const iso = p.isoDate || excelDate(p.date) || "";
-    const ws = isoWeekStart(iso) || String(p.week || "").slice(0, 10);
-    if (!ws || !p.riderId) return;
-    const key = String(p.riderId).toLowerCase() + "|" + ws;
-    if (!map.has(key))
-      map.set(key, {
-        riderId: p.riderId || "",
-        rider: p.rider || "",
-        weekStart: ws,
-        amount: 0,
-        lm: 0,
-        primary: 0,
-        club: 0,
-        days: 0,
-        status: "Pending",
-        source: "Daily Excel",
-      });
-    const x = map.get(key);
-    x.amount += Number(p.amount || 0);
-    x.lm += Number(p.lm || 0);
-    x.primary += Number(p.primary || 0);
-    x.club += Number(p.club || 0);
-    x.days += 1;
-    if (p.amount > 0) x.status = "Completed";
-    if (p.source && p.source !== "Manual" && p.source !== "Manual Adjustment")
-      x.source = "Excel";
-  });
-  db.weeklyPayments.forEach((w) => {
-    if (!w.riderId) return;
-    const key = String(w.riderId).toLowerCase() + "|" + w.weekStart;
-    const x = map.get(key) || {
-      riderId: w.riderId || "",
-      rider: w.rider || "",
-      weekStart: w.weekStart,
-      amount: 0,
-      lm: 0,
-      primary: 0,
-      club: 0,
-      days: 0,
-      status: "Pending",
-      source: "Excel",
-    };
-    x.weeklyCompleted = Number(w.amount || 0);
-    x.status = w.status || "Completed";
-    x.source = w.source || "Excel";
-    map.set(key, x);
-  });
-  return [...map.values()]
-    .map((x) => ({
-      ...x,
-      displayAmount: x.weeklyCompleted != null ? x.weeklyCompleted : x.amount,
-    }))
-    .sort(
-      (a, b) =>
-        String(b.weekStart).localeCompare(String(a.weekStart)) ||
-        String(a.rider).localeCompare(String(b.rider)),
-    );
-}
-window.editWeeklyPaymentStatus = function (riderId, weekStart) {
-  const rec = db.weeklyPayments.find(
-    (x) =>
-      String(x.riderId || "") === String(riderId || "") &&
-      String(x.weekStart || "") === String(weekStart || ""),
-  );
-  if (!rec) {
-    toast("Weekly payment record not found");
-    return;
-  }
-  openModal(
-    `<h3>Edit Payment Status</h3><p class="muted">${esc(rec.rider || "")} · ${esc(weekLabel(weekStart))}</p><div class="field"><label>Status</label><select id="editWeeklyStatus"><option ${rec.status === "Pending" ? "selected" : ""}>Pending</option><option ${rec.status === "Completed" ? "selected" : ""}>Completed</option><option ${rec.status === "Paid" ? "selected" : ""}>Paid</option><option ${rec.status === "Failed" ? "selected" : ""}>Failed</option></select></div><div class="modal-actions"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="button" class="primary" onclick="saveWeeklyPaymentStatus('${esc(riderId)}','${esc(weekStart)}')">Update Status</button></div>`,
-  );
-};
-window.saveWeeklyPaymentStatus = function (riderId, weekStart) {
-  const status =
-    document.getElementById("editWeeklyStatus")?.value || "Pending";
-  const rec = db.weeklyPayments.find(
-    (x) =>
-      String(x.riderId || "") === String(riderId || "") &&
-      String(x.weekStart || "") === String(weekStart || ""),
-  );
-  if (!rec) return;
-  rec.status = status;
-  save();
-  closeModal();
-  render("payments");
-  toast("Payment status updated");
-};
-window.editPaymentStatus = function (paymentId) {
-  const rec = db.payments.find(
-    (x) => String(x.id || "") === String(paymentId || ""),
-  );
-  if (!rec) {
-    toast("Payment record not found");
-    return;
-  }
-  openModal(
-    `<h3>Edit Payment Status</h3><p class="muted">${esc(rec.rider || "")} · ${esc(rec.date || "")}</p><div class="field"><label>Status</label><select id="editPaymentStatus"><option ${rec.status === "Pending" ? "selected" : ""}>Pending</option><option ${rec.status === "Completed" ? "selected" : ""}>Completed</option><option ${rec.status === "Paid" ? "selected" : ""}>Paid</option><option ${rec.status === "Failed" ? "selected" : ""}>Failed</option></select></div><div class="modal-actions"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="button" class="primary" onclick="savePaymentStatus('${esc(paymentId)}')">Update Status</button></div>`,
-  );
-};
-window.savePaymentStatus = function (paymentId) {
-  const status =
-    document.getElementById("editPaymentStatus")?.value || "Pending";
-  const rec = db.payments.find(
-    (x) => String(x.id || "") === String(paymentId || ""),
-  );
-  if (!rec) return;
-  rec.status = status;
-  save();
-  closeModal();
-  render("payments");
-  toast("Payment status updated");
-};
-function riderWeekRecords(riderId, weekStart) {
-  const start = new Date(String(weekStart || "") + "T00:00:00");
-  if (isNaN(start)) return [];
-  const rows = [];
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(start);
-    d.setDate(start.getDate() + i);
-    const iso = d.toISOString().slice(0, 10);
-    let p = db.payments.find(
-      (x) =>
-        String(x.riderId || "") === String(riderId || "") &&
-        String(x.isoDate || excelDate(x.date) || "") === iso,
-    );
-    if (!p) {
-      const rider = db.riders.find((r) => String(r.id) === String(riderId));
-      p = {
-        id: "",
-        riderId: riderId,
-        rider: rider?.name || "",
-        isoDate: iso,
-        date: displayDate(iso),
-        week: weekStart,
-        lm: 0,
-        primary: 0,
-        club: 0,
-        amount: 0,
-        status: "Pending",
-        source: "Weekly View",
-      };
-    }
-    rows.push({ ...p, isoDate: iso, date: displayDate(iso) });
-  }
-  return rows;
-}
-window.openRiderWeekDetails = function (riderId, weekStart) {
-  const rider = db.riders.find((r) => String(r.id) === String(riderId));
-  if (!rider) {
-    toast("Rider not found");
-    return;
-  }
-  const rows = riderWeekRecords(riderId, weekStart);
-  const totalLM = rows.reduce((a, x) => a + Number(x.lm || 0), 0);
-  const totalPrimary = rows.reduce((a, x) => a + Number(x.primary || 0), 0);
-  const totalClub = rows.reduce((a, x) => a + Number(x.club || 0), 0);
-  const excelPeriod = weeklyStore.rows.find(
-    (x) =>
-      String(x.riderId || "").toLowerCase() === String(riderId).toLowerCase() &&
-      String(x.weekStart || "") === String(weekStart || ""),
-  );
-  const totalAmount = Number(
-    excelPeriod?.amount ?? rows.reduce((a, x) => a + Number(x.amount || 0), 0),
-  );
-  openModal(
-    `<h3>${esc(rider.name)} — Week Details</h3><p class="muted">${esc(weekLabel(weekStart))} · ${esc(rider.id)}</p><div class="cards mini-week-cards"><div class="stat"><span>LM</span><b>${totalLM}</b></div><div class="stat"><span>Primary</span><b>${totalPrimary}</b></div><div class="stat"><span>Club</span><b>${totalClub}</b></div><div class="stat"><span>Excel Period Amount</span><b>${formatINR(totalAmount)}</b></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Day</th><th>Date</th><th>LM</th><th>Primary</th><th>Club</th><th>Amount</th><th>Status</th><th>Update</th></tr></thead><tbody>${rows
-      .map((x, i) => {
-        const d = new Date(x.isoDate + "T00:00:00");
-        const day = d.toLocaleDateString("en-IN", { weekday: "long" });
-        return `<tr><td><b>${day}</b></td><td>${esc(x.date)}</td><td><input class="week-edit-input" id="wlm_${i}" type="number" min="0" value="${Number(x.lm || 0)}"></td><td><input class="week-edit-input" id="wpri_${i}" type="number" min="0" value="${Number(x.primary || 0)}"></td><td><input class="week-edit-input" id="wclub_${i}" type="number" min="0" value="${Number(x.club || 0)}"></td><td><input class="week-edit-input" id="wamt_${i}" type="number" min="0" step="0.01" value="${Number(x.amount || 0)}"></td><td><select class="week-edit-input" id="wstatus_${i}"><option ${x.status === "Paid" ? "selected" : ""}>Paid</option><option ${x.status === "Completed" ? "selected" : ""}>Completed</option><option ${x.status === "Pending" || !x.status ? "selected" : ""}>Pending</option></select></td><td><button class="btn-sm" onclick="updateRiderWeekDay('${esc(riderId)}','${esc(weekStart)}','${esc(x.isoDate)}',${i})">Update</button></td></tr>`;
-      })
-      .join(
-        "",
-      )}</tbody></table></div><div class="modal-actions"><button type="button" class="ghost" onclick="closeModal()">Close</button></div>`,
-  );
-};
-window.updateRiderWeekDay = function (riderId, weekStart, isoDate, index) {
-  const rider = db.riders.find((r) => String(r.id) === String(riderId));
-  if (!rider) return;
-  const lm = Number(document.getElementById("wlm_" + index)?.value || 0);
-  const primary = Number(document.getElementById("wpri_" + index)?.value || 0);
-  const club = Number(document.getElementById("wclub_" + index)?.value || 0);
-  const amount = Number(document.getElementById("wamt_" + index)?.value || 0);
-  const status =
-    document.getElementById("wstatus_" + index)?.value || "Pending";
-  let p = db.payments.find(
-    (x) =>
-      String(x.riderId || "") === String(riderId) &&
-      String(x.isoDate || excelDate(x.date) || "") === isoDate,
-  );
-  if (!p) {
-    p = {
-      id: uid("PAY"),
-      riderId: riderId,
-      rider: rider.name,
-      source: "Weekly View",
-    };
-    db.payments.push(p);
-  }
-  Object.assign(p, {
-    riderId: riderId,
-    rider: rider.name,
-    isoDate: isoDate,
-    date: displayDate(isoDate),
-    week: weekStart,
-    lm,
-    primary,
-    club,
-    amount,
-    status,
-    source:
-      p.source === "Weekly View"
-        ? "Manual Adjustment"
-        : p.source || "Manual Adjustment",
-    importKey: p.importKey || (riderId || normText(rider.name)) + "|" + isoDate,
-  });
-  save();
-  openRiderWeekDetails(riderId, weekStart);
-  toast("Week day updated");
-};
-function yesNoIcon(value) {
-  const v = String(value ?? "")
-    .trim()
-    .toLowerCase();
-  if (v === "yes" || v === "y" || v === "true" || v === "1")
-    return '<span class="yes-no-icon yes" title="Yes">✓</span>';
-  if (v === "no" || v === "n" || v === "false" || v === "0")
-    return '<span class="yes-no-icon no" title="No">✕</span>';
-  return esc(value ?? "");
-}
-
 function normText(v) {
   return String(v ?? "")
     .trim()
@@ -2196,10 +1954,10 @@ function riderForExcel(id, name, hub) {
     if (matches.length === 1) r = matches[0];
   }
   if (!r) {
-    const seed = excelId.toUpperCase() + "|" + normalized || "unknown";
+    const seedVal = excelId.toUpperCase() + "|" + normalized || "unknown";
     let hash = 2166136261;
-    for (let i = 0; i < seed.length; i++) {
-      hash ^= seed.charCodeAt(i);
+    for (let i = 0; i < seedVal.length; i++) {
+      hash ^= seedVal.charCodeAt(i);
       hash = Math.imul(hash, 16777619);
     }
     const provisionalKey =
@@ -2224,359 +1982,6 @@ function riderForExcel(id, name, hub) {
     }
   } else if (hub && !r.hub) r.hub = hub;
   return r;
-}
-async function legacyDailyImport(file, buf) {
-  const wb = XLSX.read(buf, { type: "array", cellDates: true });
-  const norm = (h) =>
-    String(h ?? "")
-      .trim()
-      .toLowerCase()
-      .replace(/[₹()]/g, "")
-      .replace(/[^a-z0-9]+/g, " ")
-      .trim();
-  const aliases = {
-    id: [
-      "payment id",
-      "transaction id",
-      "invoice number",
-      "invoice no",
-      "order id",
-      "reference id",
-      "transaction reference",
-    ],
-    riderId: ["rider id", "rider_id"],
-    name: ["rider name", "rider_name", "name"],
-    date: ["order date", "order_date", "date"],
-    lm: ["total lm orders", "total lm order", "lm orders", "lm"],
-    primary: [
-      "total primary orders",
-      "total primary order",
-      "total primary",
-      "primary orders",
-      "primary",
-    ],
-    club: [
-      "total club orders",
-      "total club order",
-      "total club",
-      "club orders",
-      "club",
-    ],
-    rate: ["rate applicable", "rate"],
-    amount: ["payout amount", "payout amount inr", "payout"],
-  };
-  const val = (row, names) => {
-    const wanted = names.map(norm);
-    const k = Object.keys(row).find((k) => wanted.includes(norm(k)));
-    return k === undefined ? "" : row[k];
-  };
-  const money = (v) => {
-    if (v === null || v === undefined || String(v).trim() === "") return null;
-    const n = Number(
-      String(v)
-        .replace(/,/g, "")
-        .replace(/[₹$]/g, "")
-        .replace(/[^\d.-]/g, ""),
-    );
-    return Number.isFinite(n) && n >= 0 ? n : null;
-  };
-  const required = ["name", "date", "lm", "primary", "club"];
-  let inserted = 0,
-    updated = 0,
-    invalid = 0,
-    workAdded = 0,
-    weeklyUpdated = 0,
-    completedAmount = 0,
-    processed = 0;
-  const shareRecords = [];
-  const dailyName = wb.SheetNames.find(
-    (n) => norm(n) === "all riders daily settlement",
-  );
-  if (dailyName) {
-    const raw = XLSX.utils.sheet_to_json(wb.Sheets[dailyName], {
-      defval: "",
-      raw: true,
-    });
-    if (!raw.length)
-      throw new Error("The All Riders Daily Settlement sheet is empty.");
-    const headers = Object.keys(raw[0]);
-    const missing = required.filter(
-      (k) => !headers.some((h) => aliases[k].map(norm).includes(norm(h))),
-    );
-    if (missing.length)
-      throw new Error("Missing required columns: " + missing.join(", "));
-    const batch = [];
-    const seen = new Set();
-    for (let i = 0; i < raw.length; i++) {
-      const row = raw[i],
-        name = String(val(row, aliases.name)).trim(),
-        riderId = String(val(row, aliases.riderId)).trim(),
-        date = excelDate(val(row, aliases.date));
-      const lm = money(val(row, aliases.lm)),
-        primary = money(val(row, aliases.primary)),
-        club = money(val(row, aliases.club));
-      const rate = parseRate(val(row, aliases.rate));
-      let amount = money(val(row, aliases.amount));
-      if (
-        !name ||
-        !date ||
-        lm === null ||
-        primary === null ||
-        club === null ||
-        primary + club !== lm
-      ) {
-        invalid++;
-        continue;
-      }
-      if (amount === null)
-        amount =
-          Math.round((primary * rate.primary + club * rate.club) * 100) / 100;
-      const rider = riderForExcel(riderId, name, val(row, ["Hub", "hub"]));
-      const key = (rider.id || normText(name)) + "|" + date;
-      if (seen.has(key)) {
-        invalid++;
-        continue;
-      }
-      seen.add(key);
-      batch.push({
-        rider,
-        date,
-        lm,
-        primary,
-        club,
-        amount,
-        rate: val(row, aliases.rate),
-        source: file.name,
-        key,
-        excelRiderId: riderId,
-        excelName: name,
-      });
-    }
-    for (const rec of batch) {
-      const old = db.payments.find(
-        (p) =>
-          p.importKey === rec.key ||
-          (p.riderId === rec.rider.id &&
-            String(p.isoDate || excelDate(p.date)) === rec.date),
-      );
-      const pay = {
-        id: old?.id || uid("PAY"),
-        importKey: rec.key,
-        riderId: rec.rider.id,
-        rider: rec.rider.name,
-        date: displayDate(rec.date),
-        isoDate: rec.date,
-        week: isoWeekStart(rec.date),
-        lm: rec.lm,
-        primary: rec.primary,
-        club: rec.club,
-        amount: rec.amount,
-        status: rec.amount > 0 ? "Completed" : "Pending",
-        source: file.name,
-        rate: rec.rate,
-        updatedAt: new Date().toISOString(),
-      };
-      if (old) {
-        Object.assign(old, pay);
-        updated++;
-      } else {
-        db.payments.push(pay);
-        inserted++;
-      }
-      shareRecords.push({
-        riderId: rec.excelRiderId,
-        adminRiderId: rec.rider.id,
-        name: rec.excelName || rec.rider.name,
-        date: rec.date,
-        lm: rec.lm,
-        primary: rec.primary,
-        club: rec.club,
-        amount: rec.amount,
-      });
-      const wk = rec.rider.id + "|" + rec.date,
-        ow = db.work.find((w) => w.excelKey === wk);
-      const work = {
-        id: ow?.id || uid("WRK"),
-        excelKey: wk,
-        date: displayDate(rec.date),
-        rider: rec.rider.name,
-        riderId: rec.rider.id,
-        orders: rec.lm,
-        type: "Excel Daily Settlement",
-        notes: `LM ${rec.lm} / Primary ${rec.primary} / Club ${rec.club}`,
-        lm: rec.lm,
-        primary: rec.primary,
-        club: rec.club,
-        source: file.name,
-        updatedAt: new Date().toISOString(),
-      };
-      if (ow) Object.assign(ow, work);
-      else {
-        db.work.push(work);
-        workAdded++;
-      }
-      processed++;
-    }
-  } else {
-    let wideName =
-      wb.SheetNames.find((n) => norm(n) === "weekly summary") ||
-      wb.SheetNames.find((n) => /summary|settlement|payment/i.test(n));
-    let matrix = [],
-      hr = -1;
-    const looksLikeWideSheet = (sheetName) => {
-      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
-        header: 1,
-        defval: "",
-        raw: true,
-      });
-      for (let i = 0; i < Math.min(rows.length, 30); i++) {
-        const cells = rows[i] || [];
-        const hasName = cells.some((v) =>
-          ["name", "rider name", "rider_name"].includes(norm(v)),
-        );
-        const hasDates = cells.some((v) => !!excelDate(v));
-        if (hasName && hasDates) return { rows, headerRow: i };
-      }
-      return null;
-    };
-    let detected = wideName ? looksLikeWideSheet(wideName) : null;
-    if (!detected) {
-      for (const sheetName of wb.SheetNames) {
-        const candidate = looksLikeWideSheet(sheetName);
-        if (candidate) {
-          wideName = sheetName;
-          detected = candidate;
-          break;
-        }
-      }
-    }
-    if (!detected)
-      throw new Error(
-        "Could not detect a payment sheet. Add a header row with Rider Name/NAME and dated order columns, or use the All Riders Daily Settlement columns.",
-      );
-    matrix = detected.rows;
-    hr = detected.headerRow;
-    const headers = matrix[hr].map((v) => String(v ?? "").trim()),
-      ni = headers.findIndex((v) =>
-        ["name", "rider name", "rider_name"].includes(norm(v)),
-      ),
-      dates = headers
-        .map((h, i) => ({ i, date: excelDate(h) }))
-        .filter((x) => x.date);
-    if (!dates.length)
-      throw new Error("No valid date columns found in the Excel sheet.");
-    for (let ri = hr + 1; ri < matrix.length; ri++) {
-      const row = matrix[ri],
-        name = String(row[ni] ?? "").trim();
-      if (!name || /^(total|s no|s\.no)/i.test(name)) continue;
-      const rider = riderForExcel("", name, ""),
-        weekStart = isoWeekStart(dates.map((x) => x.date).sort()[0]);
-      for (const dc of dates) {
-        const cell = String(row[dc.i] ?? "").trim();
-        if (!cell) continue;
-        const pair = parseOrderPair(cell);
-        if (
-          !Number.isFinite(pair.lm) ||
-          pair.lm < 0 ||
-          pair.primary < 0 ||
-          pair.club < 0 ||
-          Math.abs(pair.lm - pair.primary - pair.club) > 0.001
-        ) {
-          invalid++;
-          continue;
-        }
-        if (pair.lm === 0 && pair.primary === 0 && pair.club === 0) continue;
-        const key = rider.id + "|" + dc.date,
-          old = db.payments.find(
-            (p) =>
-              p.importKey === key ||
-              (p.riderId === rider.id &&
-                String(p.isoDate || excelDate(p.date)) === dc.date),
-          ),
-          pay = {
-            id: old?.id || uid("PAY"),
-            importKey: key,
-            riderId: rider.id,
-            rider: rider.name,
-            date: displayDate(dc.date),
-            isoDate: dc.date,
-            week: weekStart,
-            lm: pair.lm,
-            primary: pair.primary,
-            club: pair.club,
-            amount: Number(old?.amount || 0),
-            status: old?.status || "Pending",
-            source: file.name,
-            updatedAt: new Date().toISOString(),
-          };
-        if (old) {
-          Object.assign(old, pay);
-          updated++;
-        } else {
-          db.payments.push(pay);
-          inserted++;
-        }
-        shareRecords.push({
-          riderId: "",
-          adminRiderId: rider.id,
-          name,
-          date: dc.date,
-          lm: pair.lm,
-          primary: pair.primary,
-          club: pair.club,
-          amount: pay.amount,
-        });
-        const ow = db.work.find((w) => w.excelKey === key),
-          work = {
-            id: ow?.id || uid("WRK"),
-            excelKey: key,
-            date: displayDate(dc.date),
-            rider: rider.name,
-            riderId: rider.id,
-            orders: pair.lm,
-            type: "Excel Daily Settlement",
-            notes: `LM ${pair.lm} / Primary ${pair.primary} / Club ${pair.club}`,
-            lm: pair.lm,
-            primary: pair.primary,
-            club: pair.club,
-            source: file.name,
-          };
-        if (ow) Object.assign(ow, work);
-        else {
-          db.work.push(work);
-          workAdded++;
-        }
-        processed++;
-      }
-    }
-  }
-  if (!processed)
-    throw new Error(
-      "No valid payment rows were found. Check required columns and row data.",
-    );
-  const now = new Date().toLocaleString("en-IN");
-  db.excelSync = {
-    lastSync: now,
-    fileName: file.name,
-    rows: processed,
-    records: processed,
-    history: [
-      ...(db.excelSync?.history || []),
-      {
-        time: now,
-        fileName: file.name,
-        records: processed,
-        inserted,
-        updated,
-        invalid,
-        workAdded,
-        weeklyUpdated,
-        completedAmount,
-      },
-    ].slice(-20),
-  };
-  save();
-  await sharePaymentImport(file.name, shareRecords, await fileSha256(buf));
 }
 async function fileSha256(buf) {
   try {
@@ -2630,23 +2035,6 @@ async function importPaymentsExcel(file) {
       },
     });
     result = out.result;
-    const serverNotes = [
-      ...(result.review || []).map((x) => x.reason),
-      ...(result.corrections || []).map(
-        (c) =>
-          `Row ${c.row} (${c.rider}): Rider ID ${c.from} corrected to the registered ID ${c.to}.`,
-      ),
-      ...(result.conflicts || []).map(
-        (c) =>
-          `${c.rider}, ${c.week}: an earlier row is saved under ID ${c.riderId}. It was kept; this week is saved under ${c.keptAs}. Review it.`,
-      ),
-    ];
-    weeklyStore.lastReport = {
-      warnings: [...parsed.warnings, ...serverNotes],
-      skipped: parsed.skipped,
-      sheets: parsed.sheets,
-      alreadyImported: result.alreadyImported,
-    };
     weeklyStore.lastImport = {
       importId: result.importId,
       fileName: result.fileName,
@@ -2659,33 +2047,7 @@ async function importPaymentsExcel(file) {
       weeks: result.weeks,
     };
     weeklyStore.newImportId = result.alreadyImported ? "" : result.importId;
-    const latest = new Map();
-    parsed.records.forEach((r) => {
-      if (r.amount === null) return;
-      const k = r.riderKey,
-        o = latest.get(k);
-      if (!o || String(r.weekStart) >= String(o.weekStart)) latest.set(k, r);
-    });
-    latest.forEach((r) => {
-      const rd = db.riders.find(
-        (x) =>
-          (r.riderId &&
-            String(x.id).toLowerCase() === r.riderId.toLowerCase()) ||
-          normText(x.name) === normText(r.riderName),
-      );
-      if (rd) rd.weekly = Number(r.amount);
-    });
     save();
-    if (parsed.layout !== "weekly") {
-      try {
-        await legacyDailyImport(file, buf);
-      } catch (e) {
-        console.warn(
-          "Daily records were not updated from this sheet:",
-          e.message,
-        );
-      }
-    }
   } catch (err) {
     console.error(err);
     toast("Excel import failed: " + (err.message || "Unknown error"));
@@ -2714,19 +2076,7 @@ async function importPaymentsExcel(file) {
   save();
   await loadWeeklyPayments();
   render("payments");
-  const rejected = (weeklyStore.lastReport?.skipped || []).filter(
-    (x) => !x.duplicate && !x.conflict,
-  ).length;
-  const savedCount =
-    (result.importedFromFile || 0) + (result.importedFromPending || 0);
-  toast(
-    result.alreadyImported
-      ? "This file was already imported. Nothing was added or changed."
-      : `Excel Import Completed Successfully. Total Excel records: ${parsed?.records?.length || result.total || 0}. Successfully imported: ${savedCount}. Pending Rider Verification: ${result.pendingTotal || 0}. Provisional payment records saved: ${result.provisionalSaved || 0}. Updated records: ${result.updated}. Duplicate records (unchanged): ${result.unchanged}.` +
-          (rejected
-            ? ` ${rejected} row${rejected === 1 ? "" : "s"} could not be read.`
-            : ""),
-  );
+  toast("Excel import completed.");
 }
 function whatsapp() {
   return (
@@ -2739,7 +2089,7 @@ function whatsapp() {
   );
 }
 function bindWhatsApp() {
-  $("#newMessage").onclick = () => messageModal();
+  if ($("#newMessage")) $("#newMessage").onclick = () => messageModal();
 }
 function useTemplate(t) {
   messageModal(t);
@@ -3148,77 +2498,11 @@ function franchiseRows(
       .join("") ||
     '<tr><td colspan="9" class="empty">No franchise records found.</td></tr>';
 }
-function vendorMemberModal(m = null) {
-  const clients = (db.partners || []).filter(
-    (p) => p.type === "Vendor" || p.type === "Franchise",
-  );
-  const currentType = m?.clientType || "Vendor";
-  openModal(
-    `<h3>${m ? "Edit" : "Add"} Client Member</h3><form id="vendorMemberForm" class="form-grid"><div class="field"><label>Member ID</label><input id="vmId" value="${esc(m?.memberId || "CM-" + String((db.vendorMembers || []).length + 1).padStart(6, "0"))}" readonly></div><div class="field"><label>Client Type</label><select id="vmType"><option ${currentType === "Vendor" ? "selected" : ""}>Vendor</option><option ${currentType === "Franchise" ? "selected" : ""}>Franchise</option></select></div><div class="field"><label>Vendor / Franchise</label><select id="vmVendor"></select></div><div class="field"><label>Member Name</label><input id="vmName" required value="${esc(m?.name || "")}"></div><div class="field"><label>Owner Email</label><input id="vmOwner" type="email" required value="${esc(m?.ownerEmail || "")}" placeholder="Client owner's email"></div><div class="field"><label>Phone</label><input id="vmPhone" value="${esc(m?.phone || "")}"></div><div class="field"><label>Role</label><input id="vmRole" value="${esc(m?.role || "Member")}"></div><div class="field"><label>Street / Area</label><input id="vmStreet" value="${esc(m?.street || "")}"></div><div class="field"><label>Nearby Location / Landmark</label><input id="vmNear" value="${esc(m?.nearby || "")}"></div><div class="field"><label>City</label><input id="vmCity" value="${esc(m?.city || "")}"></div><div class="field"><label>Pincode</label><input id="vmPin" value="${esc(m?.pincode || "")}"></div><div class="field"><label>Status</label><select id="vmStatus"><option ${m?.status !== "Inactive" ? "selected" : ""}>Active</option><option ${m?.status === "Inactive" ? "selected" : ""}>Inactive</option></select></div><div class="field span2"><label>Private Notes</label><textarea id="vmNotes">${esc(m?.notes || "")}</textarea></div><div class="modal-actions span2"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button class="primary">${m ? "Update Member" : "Save Member"}</button></div></form>`,
-  );
-  const fill = () => {
-    const type = $("#vmType").value;
-    const list = clients.filter((x) => x.type === type);
-    $("#vmVendor").innerHTML =
-      list
-        .map(
-          (v) =>
-            `<option value="${esc(v.id)}" ${m?.vendorId === v.id ? "selected" : ""}>${esc(v.appId + " - " + v.name)}</option>`,
-        )
-        .join("") || '<option value="">No clients available</option>';
-  };
-  $("#vmType").onchange = fill;
-  fill();
-  $("#vendorMemberForm").onsubmit = (e) => {
-    e.preventDefault();
-    const v = db.partners.find((x) => x.id === $("#vmVendor").value);
-    const type = $("#vmType").value;
-    const x = {
-      id: m?.id || uid("CM"),
-      memberId: $("#vmId").value,
-      name: $("#vmName").value.trim(),
-      clientType: type,
-      vendorId: v?.id || "",
-      vendorName: type === "Vendor" ? v?.name || "" : "",
-      franchiseName: type === "Franchise" ? v?.name || "" : "",
-      ownerEmail: $("#vmOwner").value.trim(),
-      phone: $("#vmPhone").value.trim(),
-      role: $("#vmRole").value.trim() || "Member",
-      street: $("#vmStreet").value.trim(),
-      nearby: $("#vmNear").value.trim(),
-      city: $("#vmCity").value.trim(),
-      pincode: $("#vmPin").value.trim(),
-      status: $("#vmStatus").value,
-      notes: $("#vmNotes").value,
-    };
-    if (m) Object.assign(m, x);
-    else db.vendorMembers.push(x);
-    save();
-    closeModal();
-    render("client");
-    toast(m ? "Client member updated" : "Client member added");
-  };
-}
-window.editVendorMember = (id) => {
-  const m = (db.vendorMembers || []).find((x) => x.id === id);
-  if (m) vendorMemberModal(m);
-};
 function bindClient() {
   const nv = $("#newVendor"),
-    nf = $("#newFranchise"),
-    mb = $("#newClientMember");
+    nf = $("#newFranchise");
   if (nv) nv.onclick = () => partnerModal({ type: "Vendor" });
   if (nf) nf.onclick = () => partnerModal({ type: "Franchise" });
-  if (mb)
-    mb.onclick = () => {
-      if (
-        !(db.partners || []).some(
-          (p) => p.type === "Vendor" || p.type === "Franchise",
-        )
-      )
-        return toast("Add a vendor or franchise first");
-      vendorMemberModal();
-    };
   const q = $("#clientSearch"),
     sf = $("#clientStatusFilter");
   const apply = () => {
@@ -3247,13 +2531,6 @@ function bindClient() {
               p.nearby,
               p.landmark,
               p.remarks,
-              p.investmentCapacity,
-              p.preferredLocation,
-              p.whatsapp,
-              p.ownerName,
-              p.companyName,
-              p.additionalMessage,
-              p.additionalInfo,
               p.portalLogin?.loginId,
             ]
               .join(" ")
@@ -3664,17 +2941,17 @@ function startPartnerPolling() {
   knownPartnerIds = null;
   syncPartnerApplications();
   rrLoad({ quiet: true });
-  notifStart();
+  if (typeof notifStart === "function") notifStart();
   partnerPollTimer = setInterval(() => {
     syncPartnerApplications();
-    notifLoad({ quiet: true });
+    if (typeof notifLoad === "function") notifLoad({ quiet: true });
     rrLoad({ quiet: true });
     checkPasswordHelpRequests();
     checkSupportTicketsAlert({ notifyOnIncrease: true });
   }, PARTNER_POLL_MS);
 }
 function stopPartnerPolling() {
-  notifStop();
+  if (typeof notifStop === "function") notifStop();
   if (partnerPollTimer) clearInterval(partnerPollTimer);
   partnerPollTimer = null;
 }
@@ -3715,13 +2992,6 @@ function bindPartners() {
               p.nearby,
               p.landmark,
               p.remarks,
-              p.investmentCapacity,
-              p.preferredLocation,
-              p.whatsapp,
-              p.ownerName,
-              p.companyName,
-              p.additionalMessage,
-              p.additionalInfo,
               p.portalLogin?.loginId,
             ]
               .join(" ")
@@ -4237,75 +3507,46 @@ function bindAdminAccounts() {
 }
 function bindSettings() {
   bindAdminAccounts();
-  $("#adminPwForm").onsubmit = async (e) => {
-    e.preventDefault();
-    const m = $("#apMessage");
-    m.className = "form-message";
-    if ($("#apNew").value !== $("#apConfirm").value) {
-      m.textContent = "The two new passwords do not match.";
-      m.classList.add("error");
-      return;
-    }
-    const out = await authCall("/change-password", {
-      currentPassword: $("#apCurrent").value,
-      newPassword: $("#apNew").value,
-    }).catch(() => ({ ok: false, error: "Cannot reach the server." }));
-    if (!out.ok) {
-      m.textContent = out.error || "Could not change the password.";
-      m.classList.add("error");
-      if (out.status === 401) sessionEnded();
-      return;
-    }
-    e.target.reset();
-    m.textContent = "Password changed.";
-    m.classList.add("success");
-    toast("Password changed");
-  };
-  $("#clearData").onclick = () => {
-    if (
-      confirm(
-        "Clear the data kept only in this browser (Daily Work, WhatsApp messages, manual payment adjustments)? Server data is not changed.",
-      )
-    ) {
-      db = structuredClone(seed);
-      save();
-      rrLoad({ quiet: true });
-      toast("This browser's data was reset");
-      render("dashboard");
-    }
-  };
+  if ($("#adminPwForm"))
+    $("#adminPwForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const m = $("#apMessage");
+      m.className = "form-message";
+      if ($("#apNew").value !== $("#apConfirm").value) {
+        m.textContent = "The two new passwords do not match.";
+        m.classList.add("error");
+        return;
+      }
+      const out = await authCall("/change-password", {
+        currentPassword: $("#apCurrent").value,
+        newPassword: $("#apNew").value,
+      }).catch(() => ({ ok: false, error: "Cannot reach the server." }));
+      if (!out.ok) {
+        m.textContent = out.error || "Could not change the password.";
+        m.classList.add("error");
+        if (out.status === 401) sessionEnded();
+        return;
+      }
+      e.target.reset();
+      m.textContent = "Password changed.";
+      m.classList.add("success");
+      toast("Password changed");
+    };
+  if ($("#clearData"))
+    $("#clearData").onclick = () => {
+      if (
+        confirm(
+          "Clear the data kept only in this browser (Daily Work, WhatsApp messages, manual payment adjustments)? Server data is not changed.",
+        )
+      ) {
+        db = structuredClone(seed);
+        save();
+        rrLoad({ quiet: true });
+        toast("This browser's data was reset");
+        render("dashboard");
+      }
+    };
 }
-$("#content").addEventListener("click", (e) => {
-  if (e.target.id === "exportCsv") {
-    const rows = [
-      [
-        "Rider Name",
-        "Rider ID",
-        "Phone",
-        "Location",
-        "Status",
-        "Weekly Payment",
-      ],
-      ...db.riders.map((r) => [
-        r.name,
-        r.id,
-        r.phone,
-        r.location,
-        r.status,
-        r.weekly,
-      ]),
-    ];
-    const csv = rows
-      .map((r) =>
-        r.map((v) => '"' + String(v).replaceAll('"', '""') + '"').join(","),
-      )
-      .join("\n");
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    a.download = "on_the_way_logistics_riders.csv";
-    a.click();
-  }
-});
 
 /* ========================= Payment Management ========================= */
 function ensurePaymentState() {
@@ -4322,29 +3563,6 @@ function ensurePaymentState() {
   };
 }
 ensurePaymentState();
-function auditPayment(action, details = {}) {
-  ensurePaymentState();
-  db.paymentAudit.unshift({
-    id: uid("AUD"),
-    at: new Date().toISOString(),
-    admin: currentUser?.email || "system",
-    action,
-    details,
-  });
-  db.paymentAudit = db.paymentAudit.slice(0, 500);
-  save();
-}
-function autoPayStatusBadge(s) {
-  const cls =
-    s === "Active"
-      ? "success"
-      : s === "Paused"
-        ? "warning"
-        : s === "Cancelled"
-          ? "danger"
-          : "info";
-  return `<span class="badge ${cls}">${esc(s)}</span>`;
-}
 const formatINR = (n) => PaymentExcel.formatINR(n);
 const WEEKLY_PAGE_SIZE = 25;
 const weeklyStore = {
@@ -4698,39 +3916,6 @@ function bindPayments() {
     paintWeeklyPayments();
   });
   loadWeeklyPayments();
-  $("#addPayment")?.addEventListener("click", () => {
-    if (!db.riders.length) return toast("Add a rider first");
-    openModal(
-      `<h3>Manual Payment Adjustment</h3><form id="payForm" class="form-grid"><div class="field"><label>Rider</label><select id="pRider">${db.riders.map((r) => `<option>${esc(r.name)}</option>`).join("")}</select></div><div class="field"><label>Week</label><input id="pWeek" type="week" required></div><div class="field"><label>Amount</label><input id="pAmount" type="number" required min="0"></div><div class="field"><label>Status</label><select id="pStatus"><option>Pending</option><option>Paid</option></select></div><div class="modal-actions span2"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button class="primary">Save</button></div></form>`,
-    );
-    $("#payForm").onsubmit = (e) => {
-      e.preventDefault();
-      const rider = db.riders.find((r) => r.name === $("#pRider").value),
-        week = $("#pWeek").value,
-        iso = week ? week + "-1" : new Date().toISOString().slice(0, 10);
-      db.payments.push({
-        id: uid("PAY"),
-        date: displayDate(iso),
-        isoDate: iso,
-        rider: $("#pRider").value,
-        riderId: rider?.id || "",
-        week: isoWeekStart(iso),
-        amount: Number($("#pAmount").value),
-        status: $("#pStatus").value,
-        lm: 0,
-        primary: 0,
-        club: 0,
-        source: "Manual Adjustment",
-      });
-      auditPayment("manual_payment_adjustment", {
-        rider: rider?.id || "",
-        amount: Number($("#pAmount").value),
-        status: $("#pStatus").value,
-      });
-      closeModal();
-      render("payments");
-    };
-  });
   $("#paymentExcelImport")?.addEventListener("change", async (e) => {
     const file = e.target.files?.[0];
     if (file) await importPaymentsExcel(file);
@@ -4943,57 +4128,6 @@ window.viewPartner = (id) => {
         showForm(id);
     });
   };
-}
-
-async function sharePaymentImport(fileName, records, fileHash = "") {
-  if (!records.length) return;
-  try {
-    const r = await fetch(PARTNER_API_BASE + "/api/admin/payment-import", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fileName, fileHash, records }),
-    });
-    const out = await r.json().catch(() => ({}));
-    if (r.status === 401) return sessionEnded();
-    if (!r.ok) throw new Error(out.error || "Server responded " + r.status);
-    showShareSummary(out);
-  } catch (e) {
-    toast(
-      "Payments imported here, but partners could not be notified: " +
-        (e.message === "Failed to fetch"
-          ? "the server is not reachable."
-          : e.message),
-    );
-  }
-}
-function showShareSummary(o) {
-  const v = o.version || {};
-  const shared = o.shared || [];
-  const flagged = o.flagged || [];
-  if (o.alreadyImported) {
-    openModal(`<h3>This Excel file was already imported</h3>
-      <p>Nothing was changed. The file is already saved as version <b>${Number(v.seq) || ""}</b> (${esc(v.fileName || "")}, imported ${esc(fmtDate(v.importedAt))}).</p>
-      <div class="modal-actions"><button type="button" class="primary" onclick="closeModal()">OK</button></div>`);
-    return;
-  }
-  openModal(`<h3>Excel File Imported Successfully!</h3>
-    <p>Saved as version <b>${Number(v.seq) || ""}</b>, now the active payment data. Rows: <b>${Number(v.rows) || 0}</b>. Shared with partners: <b>${Number(v.matched) || 0}</b>. Need review: <b>${Number(v.review) || 0}</b>. Not found in registrations: <b>${Number(v.unmatched) || 0}</b>. Registered by the Admin or an inactive partner (not shared): <b>${Number(v.noPartner) || 0}</b>.${o.duplicates ? ` Duplicate rider/date rows in the file (last one kept): <b>${Number(o.duplicates)}</b>.` : ""}${o.skipped ? ` Rows skipped (no valid name, date or numbers): <b>${Number(o.skipped)}</b>.` : ""}</p>
-    ${shared.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Partner</th><th>Type</th><th>Riders</th><th>Daily records</th></tr></thead><tbody>${shared.map((x) => `<tr><td><b>${esc(x.loginId)}</b> ${esc(x.name)}</td><td>${x.role === "vendor" ? "Vendor" : "Franchise"}</td><td>${Number(x.riders)}</td><td>${Number(x.records)}</td></tr>`).join("")}</tbody></table></div>` : "<p>No partner received riders from this file.</p>"}
-    ${
-      flagged.length
-        ? `<h4>Unmatched Rider Records (${flagged.length}${flagged.length >= 500 ? "+" : ""})</h4><p class="cred-note">Review these before they can be shared. Name mismatches are never assigned automatically.</p><div class="table-wrap"><table class="table"><thead><tr><th>Status</th><th>Rider ID</th><th>Rider Name (sheet)</th><th>Date</th><th>Reason</th></tr></thead><tbody>${flagged
-            .slice(0, 200)
-            .map(
-              (r) =>
-                `<tr><td>${r.status === "review" ? "Review" : "Unmatched"}</td><td>${esc(r.riderId || "-")}</td><td>${esc(r.riderName)}</td><td>${esc(r.date)}</td><td>${esc(r.note || "")}</td></tr>`,
-            )
-            .join(
-              "",
-            )}</tbody></table></div>${flagged.length > 200 ? `<p class="muted">Showing the first 200 of ${flagged.length}.</p>` : ""}`
-        : ""
-    }
-    <div class="modal-actions"><button type="button" class="primary" onclick="closeModal()">OK</button></div>`);
 }
 
 /* ========================= Rider member registrations (Admin) ========================= */
@@ -5362,7 +4496,7 @@ function rrConfirmDecision(item, status) {
     <div class="field span2"><label for="rrRemarks">${approve ? "Remarks (optional)" : "Reason for rejection *"}</label><textarea id="rrRemarks" rows="3" maxlength="500" placeholder="${approve ? "e.g. Documents verified" : "e.g. Aadhaar photo is not readable"}"></textarea></div>
     <p id="rrDecisionError" class="form-message error" role="alert"></p>
     <div class="modal-actions"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="button" id="rrConfirm" class="primary ${approve ? "accept-fill" : "danger-fill"}">${approve ? "✓ Approve" : "✕ Reject"}</button></div>`);
-  $("#rrRemarks").focus();
+  $("#rrRemarks")?.focus();
   $("#rrConfirm").onclick = async () => {
     const remarks = $("#rrRemarks").value.trim();
     if (!approve && !remarks) {
@@ -5463,7 +4597,7 @@ function rrOpenForm() {
   $("#rrAadhaar").onchange = (e) =>
     rrPickFile(e.target, $("#rrAadhaarPreview"), "aadhaar");
   $("#rrForm").onsubmit = rrSubmitForm;
-  $("#rrId").focus();
+  $("#rrId")?.focus();
 }
 function rrFormFail(field, message) {
   const el = document.getElementById(RR_FORM_FIELD[field] || field);
