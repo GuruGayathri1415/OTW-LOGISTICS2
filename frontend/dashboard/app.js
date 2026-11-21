@@ -102,7 +102,7 @@ function showApp() {
   startPartnerPolling();
   startSupportAlertPolling();
   loadWeeklyPayments();
-  initHubs().catch(() => {});
+  if (typeof initHubs === "function") initHubs().catch(() => {});
   checkPasswordHelpRequests();
 }
 
@@ -600,6 +600,7 @@ function dashboard() {
   const active = db.riders.filter((r) => r.status === "Active").length;
   const activeHubs = db.hubs.filter((h) => h.status !== "Inactive").length;
   const totalHubs = db.hubs.length;
+  const pendingCount = typeof rrPendingCount === "function" ? rrPendingCount() : 0;
   const ws = dashboardWeeklyStats();
   const fmtN = (n) => Number(n || 0).toLocaleString("en-IN");
   const rupees = (n) =>
@@ -625,7 +626,7 @@ function dashboard() {
   <div class="dashboard-brand-card"><img src="logo.jpg" alt="On The Way Logistics logo" class="dashboard-main-logo"></div>
   <div class="dashboard-title-row"><div><h1>Dashboard</h1><p>Welcome back! Here's your logistics overview.</p></div><button class="refresh-btn" id="dashboardRefresh">↻ Refresh</button></div>
   <div class="dashboard-stats">
-    ${dashStat("TOTAL RIDERS", db.riders.length, rrPendingCount() ? `${rrPendingCount()} new waiting for approval (Riders page)` : "Registered riders", "blue")}
+    ${dashStat("TOTAL RIDERS", db.riders.length, pendingCount ? `${pendingCount} new waiting for approval (Riders page)` : "Registered riders", "blue")}
     ${dashStat("ACTIVE RIDERS", active, "Currently active", "green")}
     ${dashStat("TOTAL HUBS", totalHubs, "All delivery hubs", "purple")}
     ${dashStat("ACTIVE HUBS", activeHubs, "Operational hubs", "orange")}
@@ -758,7 +759,7 @@ function bindDashboard() {
     syncPartnerApplications();
     await Promise.all([
       loadWeeklyPayments(),
-      rrLoad({ quiet: true }),
+      typeof rrLoad === "function" ? rrLoad({ quiet: true }) : Promise.resolve(),
       typeof loadHubs === "function" ? loadHubs({ quiet: true }) : Promise.resolve(true),
       checkSupportTicketsAlert({ notifyOnIncrease: false }),
     ]);
@@ -863,7 +864,8 @@ function bindRiders() {
 function paintPendingRiders() {
   const card = $("#riderPendingCard");
   if (!card) return;
-  const list = (rrItems || [])
+  const items = typeof rrItems !== "undefined" && Array.isArray(rrItems) ? rrItems : [];
+  const list = items
     .filter((r) => r.status === "PENDING")
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
   card.classList.toggle("hidden", !list.length);
@@ -872,7 +874,7 @@ function paintPendingRiders() {
   card.innerHTML = `<div class="section-head"><div><h3>⏳ Waiting for approval (${list.length})</h3><p class="muted">${fromPartners ? `${fromPartners} added by Vendors / Franchises. ` : ""}Approve a rider to move them into the Riders list below; Reject needs a reason.</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Rider ID</th><th>Rider Name</th><th>Mobile Number</th><th>Hub Pincode</th><th>Hub Location</th><th>Selfie</th><th>Aadhaar</th><th>Added By</th><th>Added On</th><th>Status</th><th>Action</th></tr></thead><tbody>${list.map(rrRow).join("")}</tbody></table></div>`;
 }
 function updateRiderNavCount() {
-  const n = (rrItems || []).filter((r) => r.status === "PENDING").length;
+  const n = typeof rrPendingCount === "function" ? rrPendingCount() : 0;
   const btn = document.querySelector('.nav[data-page="riders"]');
   if (!btn) return;
   let b = btn.querySelector(".nav-count");
@@ -1151,7 +1153,10 @@ window.viewRider = async (id) => {
   let registration = null,
     weekly = [];
   try {
-    await Promise.all([rrLoad({ quiet: true }), loadAdminDocs()]);
+    await Promise.all([
+      typeof rrLoad === "function" ? rrLoad({ quiet: true }) : Promise.resolve(),
+      loadAdminDocs(),
+    ]);
     registration =
       (rrItems || []).find(
         (x) => normalizeRiderLinkId(x.riderId) === riderKey,
@@ -1177,8 +1182,11 @@ window.viewRider = async (id) => {
   const docs = docsOfRider(r);
   const total = weekly.reduce((n, x) => n + Number(x.amount || 0), 0),
     dailyTotal = daily.reduce((n, x) => n + Number(x.amount || 0), 0);
+  const badgeHtml = typeof rrStatusBadge === "function"
+    ? rrStatusBadge(registration?.status)
+    : esc(registration?.status || "");
   const docLinks = registration
-    ? `<div class="rr-doc-buttons"><button type="button" class="btn-sm" id="profileSelfie">View rider selfie / screenshot</button><button type="button" class="btn-sm" id="profileAadhaar">Preview Aadhaar</button></div><p class="hint">Registration status: ${rrStatusBadge(registration.status)} · Secure documents are available to signed-in admins.</p>`
+    ? `<div class="rr-doc-buttons"><button type="button" class="btn-sm" id="profileSelfie">View rider selfie / screenshot</button><button type="button" class="btn-sm" id="profileAadhaar">Preview Aadhaar</button></div><p class="hint">Registration status: ${badgeHtml} · Secure documents are available to signed-in admins.</p>`
     : '<p class="hint">No secure registration documents are linked to this Rider ID yet.</p>';
   const weeklyRows =
     weekly
@@ -1327,11 +1335,12 @@ function documentSections() {
 }
 function documentsListHtml() {
   const secs = documentSections();
+  const regs = typeof rrItems !== "undefined" && Array.isArray(rrItems) ? rrItems : [];
   if (!secs.length)
     return `<div class="empty" style="padding:18px 0">${docSearch.query.trim() ? "No matching riders or documents found" : "No riders yet."}</div>`;
   return secs
     .map(({ r, docs }) => {
-      const reg = (rrItems || []).find(
+      const reg = regs.find(
         (x) => normalizeRiderLinkId(x.riderId) === normalizeRiderLinkId(r.id),
       );
       const extra = reg
@@ -1433,7 +1442,8 @@ function bindDocuments() {
   $("#documentsList")?.addEventListener("click", (e) => {
     const b = e.target.closest("[data-reg-doc]");
     if (!b) return;
-    const reg = rrItems.find((x) => x.id === b.dataset.regId);
+    const regs = typeof rrItems !== "undefined" && Array.isArray(rrItems) ? rrItems : [];
+    const reg = regs.find((x) => x.id === b.dataset.regId);
     if (reg)
       rrOpenDocument(
         reg.id,
@@ -1441,7 +1451,10 @@ function bindDocuments() {
         `${b.dataset.regDoc === "selfie" ? "Rider selfie" : "Aadhaar"} · ${b.dataset.regName} (${reg.riderId})`,
       );
   });
-  Promise.all([rrLoad({ quiet: true }), loadAdminDocs()]).then(() => {
+  Promise.all([
+    typeof rrLoad === "function" ? rrLoad({ quiet: true }) : Promise.resolve(),
+    loadAdminDocs(),
+  ]).then(() => {
     if (currentPage === "documents" && $("#documentsList")) paint();
   });
 }
@@ -2560,7 +2573,7 @@ function bindClient() {
     exportBtn.onclick = () => exportPartnerRows(activeClientType());
   apply();
   syncPartnerApplications();
-  rrBindClientPage();
+  if (typeof rrBindClientPage === "function") rrBindClientPage();
   $$(".tab-btn").forEach(
     (b) =>
       (b.onclick = () => {
@@ -2940,12 +2953,12 @@ function startPartnerPolling() {
   stopPartnerPolling();
   knownPartnerIds = null;
   syncPartnerApplications();
-  rrLoad({ quiet: true });
+  if (typeof rrLoad === "function") rrLoad({ quiet: true });
   if (typeof notifStart === "function") notifStart();
   partnerPollTimer = setInterval(() => {
     syncPartnerApplications();
     if (typeof notifLoad === "function") notifLoad({ quiet: true });
-    rrLoad({ quiet: true });
+    if (typeof rrLoad === "function") rrLoad({ quiet: true });
     checkPasswordHelpRequests();
     checkSupportTicketsAlert({ notifyOnIncrease: true });
   }, PARTNER_POLL_MS);
@@ -3541,7 +3554,7 @@ function bindSettings() {
       ) {
         db = structuredClone(seed);
         save();
-        rrLoad({ quiet: true });
+        if (typeof rrLoad === "function") rrLoad({ quiet: true });
         toast("This browser's data was reset");
         render("dashboard");
       }
