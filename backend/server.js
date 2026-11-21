@@ -2080,7 +2080,11 @@ app.post(
       const read = await readRiderScreenshot(f.buffer);
       res.json({
         ok: true,
-        read: { partnerId: read.partnerId || "", name: read.name || "" },
+        read: {
+          partnerId: read?.partnerId || "",
+          name: read?.name || "",
+          mobile: read?.mobile || "",
+        },
       });
     });
   },
