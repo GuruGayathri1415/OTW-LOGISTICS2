@@ -38,12 +38,31 @@ export function gmailConfigFrom(env) {
   };
 }
 
-const b64url = (s) => Buffer.from(String(s || "").replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
-const encodeHeader = (s) => (/^[\x20-\x7e]*$/.test(s) ? s : `=?UTF-8?B?${Buffer.from(s, "utf8").toString("base64")}?=`);
+const b64url = (s) =>
+  Buffer.from(
+    String(s || "")
+      .replace(/-/g, "+")
+      .replace(/_/g, "/"),
+    "base64",
+  ).toString("utf8");
+const encodeHeader = (s) =>
+  /^[\x20-\x7e]*$/.test(s)
+    ? s
+    : `=?UTF-8?B?${Buffer.from(s, "utf8").toString("base64")}?=`;
 const wrap76 = (b64) => b64.replace(/.{1,76}/g, (m) => m + "\r\n");
 
 // Builds the RFC 2822 message Gmail expects (base64url). Returns { raw, messageId }.
-export function buildRawMessage({ from, to, cc = "", subject, text, inReplyTo = "", references = "", headers = {}, attachments = [] }) {
+export function buildRawMessage({
+  from,
+  to,
+  cc = "",
+  subject,
+  text,
+  inReplyTo = "",
+  references = "",
+  headers = {},
+  attachments = [],
+}) {
   const domain = (from.split("@")[1] || "localhost").trim();
   const messageId = `<${crypto.randomUUID()}@${domain}>`;
   const head = [
@@ -54,7 +73,9 @@ export function buildRawMessage({ from, to, cc = "", subject, text, inReplyTo = 
     `Date: ${new Date().toUTCString()}`,
     `Message-ID: ${messageId}`,
     "MIME-Version: 1.0",
-    ...(inReplyTo ? [`In-Reply-To: ${inReplyTo}`, `References: ${references || inReplyTo}`] : []),
+    ...(inReplyTo
+      ? [`In-Reply-To: ${inReplyTo}`, `References: ${references || inReplyTo}`]
+      : []),
     ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`),
   ];
   const bodyPart = [
@@ -68,7 +89,11 @@ export function buildRawMessage({ from, to, cc = "", subject, text, inReplyTo = 
     const boundary = "otw_" + crypto.randomBytes(12).toString("hex");
     const parts = [`--${boundary}\r\n${bodyPart}`];
     for (const a of attachments) {
-      const type = /\.png$/i.test(a.filename) ? "image/png" : /\.webp$/i.test(a.filename) ? "image/webp" : "image/jpeg";
+      const type = /\.png$/i.test(a.filename)
+        ? "image/png"
+        : /\.webp$/i.test(a.filename)
+          ? "image/webp"
+          : "image/jpeg";
       parts.push(
         `--${boundary}\r\nContent-Type: ${type}; name="${a.filename.replace(/"/g, "")}"\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename="${a.filename.replace(/"/g, "")}"\r\n\r\n${wrap76(Buffer.from(a.content).toString("base64"))}`,
       );
@@ -77,7 +102,9 @@ export function buildRawMessage({ from, to, cc = "", subject, text, inReplyTo = 
   } else {
     body = `${bodyPart}\r\n`;
   }
-  const raw = Buffer.from(head.join("\r\n") + "\r\n" + body, "utf8").toString("base64url");
+  const raw = Buffer.from(head.join("\r\n") + "\r\n" + body, "utf8").toString(
+    "base64url",
+  );
   return { raw, messageId };
 }
 
@@ -87,8 +114,10 @@ export function extractText(part) {
   const html = [];
   const walk = (p) => {
     if (!p) return;
-    if (p.mimeType === "text/plain" && p.body?.data) plain.push(b64url(p.body.data));
-    else if (p.mimeType === "text/html" && p.body?.data) html.push(b64url(p.body.data).replace(/<[^>]+>/g, " "));
+    if (p.mimeType === "text/plain" && p.body?.data)
+      plain.push(b64url(p.body.data));
+    else if (p.mimeType === "text/html" && p.body?.data)
+      html.push(b64url(p.body.data).replace(/<[^>]+>/g, " "));
     for (const c of p.parts || []) walk(c);
   };
   walk(part);
@@ -100,7 +129,11 @@ export function customerText(text) {
   const kept = [];
   for (const line of String(text || "").split("\n")) {
     if (/^\s*>/.test(line)) continue;
-    if (/^\s*On .{5,200} wrote:\s*$/.test(line) || /^\s*-{2,}\s*(Original|Forwarded) message/i.test(line)) break;
+    if (
+      /^\s*On .{5,200} wrote:\s*$/.test(line) ||
+      /^\s*-{2,}\s*(Original|Forwarded) message/i.test(line)
+    )
+      break;
     kept.push(line);
   }
   return kept.join("\n").trim();
@@ -110,13 +143,18 @@ export function customerText(text) {
 export function parseFrom(v) {
   const s = String(v || "").trim();
   const m = s.match(/^(.*?)<([^>]+)>\s*$/);
-  if (m) return { name: m[1].replace(/"/g, "").trim(), email: m[2].trim().toLowerCase() };
+  if (m)
+    return {
+      name: m[1].replace(/"/g, "").trim(),
+      email: m[2].trim().toLowerCase(),
+    };
   return { name: "", email: s.toLowerCase() };
 }
 
 export function parseGmailMessage(json) {
   const headers = {};
-  for (const h of json.payload?.headers || []) headers[h.name.toLowerCase()] = h.value;
+  for (const h of json.payload?.headers || [])
+    headers[h.name.toLowerCase()] = h.value;
   return {
     gmailId: json.id,
     threadId: json.threadId || "",
@@ -125,7 +163,9 @@ export function parseGmailMessage(json) {
     messageId: headers["message-id"] || "",
     inReplyTo: headers["in-reply-to"] || "",
     references: headers.references || "",
-    autoSubmitted: /auto-|bulk/i.test(headers["auto-submitted"] || headers.precedence || ""),
+    autoSubmitted: /auto-|bulk/i.test(
+      headers["auto-submitted"] || headers.precedence || "",
+    ),
     text: customerText(extractText(json.payload)),
   };
 }
@@ -133,10 +173,12 @@ export function parseGmailMessage(json) {
 // The shared Gmail client. Returns a sendMail(message) function compatible with support-mail.js.
 export function createGmailApi({ config, fetchImpl = fetch, log = console }) {
   let token = { value: "", expiresAt: 0 };
-  const configured = () => !!(config.clientId && config.clientSecret && config.refreshToken);
+  const configured = () =>
+    !!(config.clientId && config.clientSecret && config.refreshToken);
 
   async function accessToken() {
-    if (token.value && Date.now() < token.expiresAt - 60_000) return token.value;
+    if (token.value && Date.now() < token.expiresAt - 60_000)
+      return token.value;
     const r = await fetchImpl("https://oauth2.googleapis.com/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -153,36 +195,67 @@ export function createGmailApi({ config, fetchImpl = fetch, log = console }) {
         j.error === "invalid_grant"
           ? " The refresh token was revoked or expired: run node gmail-authorize.js again."
           : "";
-      throw new Error(`Gmail sign-in failed (${j.error || r.status}): ${j.error_description || "check GMAIL_OAUTH_* settings"}.${hint}`);
+      throw new Error(
+        `Gmail sign-in failed (${j.error || r.status}): ${j.error_description || "check GMAIL_OAUTH_* settings"}.${hint}`,
+      );
     }
-    token = { value: j.access_token, expiresAt: Date.now() + (Number(j.expires_in) || 3600) * 1000 };
+    token = {
+      value: j.access_token,
+      expiresAt: Date.now() + (Number(j.expires_in) || 3600) * 1000,
+    };
     return token.value;
   }
 
   async function call(p, { method = "GET", body } = {}) {
-    const r = await fetchImpl(`https://gmail.googleapis.com/gmail/v1/users/me${p}`, {
-      method,
-      headers: { Authorization: `Bearer ${await accessToken()}`, ...(body ? { "Content-Type": "application/json" } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    const r = await fetchImpl(
+      `https://gmail.googleapis.com/gmail/v1/users/me${p}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${await accessToken()}`,
+          ...(body ? { "Content-Type": "application/json" } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      },
+    );
     const j = await r.json().catch(() => ({}));
     if (!r.ok) {
       const hint =
         r.status === 403 && /insufficient|scope/i.test(j.error?.message || "")
           ? " The authorisation does not allow this. Run node gmail-authorize.js again and grant both Gmail permissions."
           : "";
-      throw new Error(`Gmail API ${method} ${p} failed (${r.status}): ${j.error?.message || "no details"}.${hint}`);
+      throw new Error(
+        `Gmail API ${method} ${p} failed (${r.status}): ${j.error?.message || "no details"}.${hint}`,
+      );
     }
     return j;
   }
 
   // Sends one message. Gmail accepts it for every recipient in the message, or the call fails.
   async function sendMail(message) {
-    const recipients = [message.to, message.cc].filter(Boolean).join(",").split(",").map((s) => s.trim()).filter(Boolean);
-    const { raw, messageId } = buildRawMessage({ ...message, from: config.supportAddress });
-    const sent = await call("/messages/send", { method: "POST", body: { raw } });
-    log.log?.(`[support-gmail] sent ${sent.id || ""} to ${recipients.join(", ")}`);
-    return { messageId, accepted: recipients, rejected: [], gmailId: sent.id || "" };
+    const recipients = [message.to, message.cc]
+      .filter(Boolean)
+      .join(",")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const { raw, messageId } = buildRawMessage({
+      ...message,
+      from: config.supportAddress,
+    });
+    const sent = await call("/messages/send", {
+      method: "POST",
+      body: { raw },
+    });
+    log.log?.(
+      `[support-gmail] sent ${sent.id || ""} to ${recipients.join(", ")}`,
+    );
+    return {
+      messageId,
+      accepted: recipients,
+      rejected: [],
+      gmailId: sent.id || "",
+    };
   }
 
   return { configured, call, sendMail };
@@ -211,20 +284,41 @@ export async function createGmailInbound({
     );
   `);
 
-  const state = { lastPollAt: "", lastError: "", lastCount: 0, polling: false, mailbox: "" };
+  const state = {
+    lastPollAt: "",
+    lastError: "",
+    lastCount: 0,
+    polling: false,
+    mailbox: "",
+  };
   const enabled = () => api.configured();
-  const seen = (gmailId) =>
-    db.prepare("SELECT 1 FROM support_inbound_messages WHERE gmail_id=?").get(gmailId);
-  const record = (msg, ticketNo, action, at) =>
+  const seen = async (gmailId) =>
+    Boolean(
+      await db
+        .prepare("SELECT 1 FROM support_inbound_messages WHERE gmail_id=?")
+        .get(gmailId),
+    );
+  const record = async (msg, ticketNo, action, at) =>
     db
       .prepare(
         `INSERT INTO support_inbound_messages(gmail_id,thread_id,from_addr,subject,ticket_id,action,received_at,processed_at)
          VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(gmail_id) DO NOTHING`,
       )
-      .run(msg.gmailId, msg.threadId, msg.from.email, msg.subject, ticketNo, action, at, at);
+      .run(
+        msg.gmailId,
+        msg.threadId,
+        msg.from.email,
+        msg.subject,
+        ticketNo,
+        action,
+        at,
+        at,
+      );
 
   const resolveAdmins = async () =>
-    typeof adminRecipients === "function" ? await adminRecipients() : adminRecipients || [];
+    typeof adminRecipients === "function"
+      ? await adminRecipients()
+      : adminRecipients || [];
 
   async function queueAdminNotice(ticket, reason, gmailId) {
     const admins = await resolveAdmins();
@@ -241,16 +335,25 @@ export async function createGmailInbound({
   // Decides what one message becomes.
   async function handle(msg) {
     const at = new Date().toISOString();
-    const own = msg.from.email === state.mailbox || msg.from.email === supportEmail.toLowerCase();
+    const own =
+      msg.from.email === state.mailbox ||
+      msg.from.email === supportEmail.toLowerCase();
     if (own || msg.autoSubmitted) {
       await record(msg, "", own ? "ignored-own" : "ignored-automatic", at);
-      return { action: own ? "ignored-own" : "ignored-automatic", ticketNo: "" };
+      return {
+        action: own ? "ignored-own" : "ignored-automatic",
+        ticketNo: "",
+      };
     }
 
-    const mentioned = (`${msg.subject}\n${msg.text}`.match(TICKET_NO_PATTERN) || [])[0] || "";
+    const mentioned =
+      (`${msg.subject}\n${msg.text}`.match(TICKET_NO_PATTERN) || [])[0] || "";
     let ticket = mentioned ? await service.rowByNumber(mentioned) : null;
     if (!ticket) {
-      ticket = await service.ticketForMessageRefs([msg.inReplyTo, ...msg.references.split(/\s+/)]);
+      ticket = await service.ticketForMessageRefs([
+        msg.inReplyTo,
+        ...msg.references.split(/\s+/),
+      ]);
     }
     let note = "";
     // Only the customer who opened a ticket may add to it. Anyone else gets a new ticket of their own.
@@ -267,7 +370,11 @@ export async function createGmailInbound({
         body: msg.text,
         messageId: msg.messageId,
       });
-      await queueAdminNotice(r.ticket, `A customer replied by email to ${r.ticket.ticket_no}.`, msg.gmailId);
+      await queueAdminNotice(
+        r.ticket,
+        `A customer replied by email to ${r.ticket.ticket_no}.`,
+        msg.gmailId,
+      );
       await record(msg, r.ticket.ticket_no, "attached", at);
       return { action: "attached", ticketNo: r.ticket.ticket_no };
     }
@@ -285,8 +392,16 @@ export async function createGmailInbound({
       subject: msg.subject,
     });
     if (!created.duplicate) await queueTicketEmails(created.ticket);
-    await record(msg, created.ticket.ticket_no, created.duplicate ? "already-created" : "created", at);
-    return { action: created.duplicate ? "already-created" : "created", ticketNo: created.ticket.ticket_no };
+    await record(
+      msg,
+      created.ticket.ticket_no,
+      created.duplicate ? "already-created" : "created",
+      at,
+    );
+    return {
+      action: created.duplicate ? "already-created" : "created",
+      ticketNo: created.ticket.ticket_no,
+    };
   }
 
   // The support copy and the customer's confirmation for a new ticket. Queued only; the outbox sends them.
@@ -302,7 +417,9 @@ export async function createGmailInbound({
       cc: admins,
       subject: NEW_TICKET_SUBJECT(t.ticket_no),
       body: newTicketBody(t, { baseUrl }),
-      attachment: t.photo_path ? { path: t.photo_path, name: t.photo_name || "problem-photo" } : null,
+      attachment: t.photo_path
+        ? { path: t.photo_path, name: t.photo_name || "problem-photo" }
+        : null,
       sourceEventId: submitted ? submitted.id : null,
     });
     if (t.email && !sameAddress(t.email, supportEmail)) {
@@ -320,24 +437,45 @@ export async function createGmailInbound({
   // One pass over unread support mail. Returns how many messages were handled.
   async function pollOnce() {
     if (!enabled())
-      throw new Error("Incoming Gmail is not connected: set GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET and GMAIL_OAUTH_REFRESH_TOKEN in backend/.env (run node gmail-authorize.js)");
+      throw new Error(
+        "Incoming Gmail is not connected: set GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET and GMAIL_OAUTH_REFRESH_TOKEN in backend/.env (run node gmail-authorize.js)",
+      );
     if (state.polling) return 0;
     state.polling = true;
     let handled = 0;
     try {
-      if (!state.mailbox) state.mailbox = String((await api.call("/profile")).emailAddress || "").toLowerCase();
-      const list = await api.call("/messages?q=" + encodeURIComponent("is:unread in:inbox") + "&maxResults=25");
+      if (!state.mailbox)
+        state.mailbox = String(
+          (await api.call("/profile")).emailAddress || "",
+        ).toLowerCase();
+      const list = await api.call(
+        "/messages?q=" +
+          encodeURIComponent("is:unread in:inbox") +
+          "&maxResults=25",
+      );
       for (const m of list.messages || []) {
         if (await seen(m.id)) {
-          await api.call(`/messages/${m.id}/modify`, { method: "POST", body: { removeLabelIds: ["UNREAD"] } }).catch(() => {});
+          await api
+            .call(`/messages/${m.id}/modify`, {
+              method: "POST",
+              body: { removeLabelIds: ["UNREAD"] },
+            })
+            .catch(() => {});
           continue;
         }
-        const msg = parseGmailMessage(await api.call(`/messages/${m.id}?format=full`));
+        const msg = parseGmailMessage(
+          await api.call(`/messages/${m.id}?format=full`),
+        );
         const result = await handle(msg);
         handled++;
-        log.log?.(`[support-inbound] from ${msg.from.email} -> ${result.action} ${result.ticketNo}`.trim());
+        log.log?.(
+          `[support-inbound] from ${msg.from.email} -> ${result.action} ${result.ticketNo}`.trim(),
+        );
         // Mark read only after the save above, so nothing is lost if this step fails.
-        await api.call(`/messages/${m.id}/modify`, { method: "POST", body: { removeLabelIds: ["UNREAD"] } });
+        await api.call(`/messages/${m.id}/modify`, {
+          method: "POST",
+          body: { removeLabelIds: ["UNREAD"] },
+        });
       }
       state.lastError = "";
       state.lastCount = handled;

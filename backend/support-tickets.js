@@ -13,11 +13,16 @@ export const SUPPORT_STATUSES = [
   "closed",
 ];
 
-export const TICKET_NO_PATTERN = /\b(?:TKT|SUP|OTW)-\d{4,10}\b|\bTKT-[A-F0-9]{6}\b/i;
+export const TICKET_NO_PATTERN =
+  /\b(?:TKT|SUP|OTW)-\d{4,10}\b|\bTKT-[A-F0-9]{6}\b/i;
 
 export function sameAddress(a, b) {
-  const left = String(a || "").trim().toLowerCase();
-  const right = String(b || "").trim().toLowerCase();
+  const left = String(a || "")
+    .trim()
+    .toLowerCase();
+  const right = String(b || "")
+    .trim()
+    .toLowerCase();
   return Boolean(left) && left === right;
 }
 
@@ -130,6 +135,38 @@ export async function createSupportService({ db, uploadDir }) {
       );
   }
 
+  async function ticketForMessageRefs(refs = []) {
+    const list = Array.isArray(refs) ? refs : [refs];
+    const candidates = [
+      ...new Set(
+        list
+          .flatMap((v) => String(v || "").split(/[\s,]+/))
+          .map((s) => cleanText(s.replace(/^<|>$/g, ""), 300))
+          .filter(Boolean),
+      ),
+    ];
+    for (const ref of candidates) {
+      const variants = [...new Set([ref, `<${ref}>`])];
+      for (const idCandidate of variants) {
+        const ev = await db
+          .prepare(
+            "SELECT ticket_id FROM support_ticket_events WHERE message_id=? ORDER BY created_at DESC LIMIT 1",
+          )
+          .get(idCandidate);
+        if (ev?.ticket_id) {
+          const ticket = await getTicketById(ev.ticket_id);
+          if (ticket) return ticket;
+        }
+      }
+      const codeMatch = ref.match(TICKET_NO_PATTERN);
+      if (codeMatch) {
+        const ticket = await getTicketByCode(codeMatch[0]);
+        if (ticket) return ticket;
+      }
+    }
+    return null;
+  }
+
   async function listTickets({
     status = "",
     requesterId = "",
@@ -231,9 +268,7 @@ export async function createSupportService({ db, uploadDir }) {
       .prepare("UPDATE support_tickets SET updated_at=? WHERE id=?")
       .run(createdAt, String(ticketId));
 
-    return db
-      .prepare("SELECT * FROM support_ticket_events WHERE id=?")
-      .get(id);
+    return db.prepare("SELECT * FROM support_ticket_events WHERE id=?").get(id);
   }
 
   async function createTicket({
@@ -419,6 +454,7 @@ export async function createSupportService({ db, uploadDir }) {
     updateStatus,
     getTicketById,
     getTicketByCode,
+    ticketForMessageRefs,
     listTickets,
     listEvents,
     saveAttachment,
