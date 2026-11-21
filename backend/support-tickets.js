@@ -29,11 +29,20 @@ export function sameAddress(a, b) {
 const ALLOWED_STATUSES = new Set(SUPPORT_STATUSES);
 const ALLOWED_PRIORITIES = new Set(["low", "normal", "high", "urgent"]);
 
+export const TEXT_LIMITS = {
+  name: 160,
+  email: 254,
+  phone: 20,
+  subject: 240,
+  description: 10000,
+};
+
 export class SupportError extends Error {
-  constructor(message, status = 400) {
+  constructor(message, status = 400, field = "") {
     super(message);
     this.name = "SupportError";
     this.status = status;
+    this.field = field;
   }
 }
 
@@ -135,6 +144,12 @@ export async function createSupportService({ db, uploadDir }) {
       );
   }
 
+  async function resolveTicket(idOrCode) {
+    const raw = String(idOrCode || "").trim();
+    if (!raw) return null;
+    return (await getTicketById(raw)) || (await getTicketByCode(raw));
+  }
+
   async function ticketForMessageRefs(refs = []) {
     const list = Array.isArray(refs) ? refs : [refs];
     const candidates = [
@@ -201,6 +216,210 @@ export async function createSupportService({ db, uploadDir }) {
         `SELECT * FROM support_tickets ${whereSql} ORDER BY updated_at DESC LIMIT ?`,
       )
       .all(...params);
+  }
+
+  function formatTicketRow(row, firstMessage = "") {
+    if (!row) return null;
+    return {
+      ...row,
+      ticket_no: row.ticket_code,
+      customer_name: row.requester_name || "",
+      email: row.requester_email || "",
+      portal_type: row.requester_role || "",
+      description: firstMessage || row.subject || "",
+    };
+  }
+
+  async function listForAdmin({ status = "", portal = "", q = "" } = {}) {
+    const rows = await listTickets({ status, search: q, limit: 250 });
+    const portalFilter = String(portal || "").trim().toLowerCase();
+    const filtered = portalFilter
+      ? rows.filter(
+          (r) => String(r.requester_role || "").toLowerCase() === portalFilter,
+        )
+      : rows;
+
+    const allRows = await listTickets({ limit: 500 });
+    const summary = {
+      total: allRows.length,
+      open: allRows.filter((r) => r.status === "open").length,
+      inProgress: allRows.filter((r) => r.status === "in_progress").length,
+      waitingOnUser: allRows.filter((r) => r.status === "waiting_on_user")
+        .length,
+      resolved: allRows.filter((r) => r.status === "resolved").length,
+      closed: allRows.filter((r) => r.status === "closed").length,
+    };
+
+    return {
+      tickets: filtered.map((r) => formatTicketRow(r)),
+      summary,
+    };
+  }
+
+  async function getForAdmin(idOrCode) {
+    const ticket = await resolveTicket(idOrCode);
+    if (!ticket) throw new SupportError("Support ticket not found.", 404);
+    const events = await listEvents(ticket.id);
+    const attachments = await listAttachments(ticket.id);
+    const firstMsg = events.find((e) => e.body)?.body || "";
+    return {
+      ticket: formatTicketRow(ticket, firstMsg),
+      events,
+      attachments,
+    };
+  }
+
+  async function listForAccount(account) {
+    const acctId = String(account?.id || account?.login_id || "");
+    if (!acctId) return [];
+    const rows = await listTickets({ requesterId: acctId, limit: 100 });
+    return rows.map((r) => formatTicketRow(r));
+  }
+
+  async function getForAccount(idOrCode, account) {
+    const ticket = await resolveTicket(idOrCode);
+    const acctId = String(account?.id || account?.login_id || "");
+    if (!ticket || String(ticket.requester_id || "") !== acctId) {
+      throw new SupportError("Support ticket not found.", 404);
+    }
+    const events = await listEvents(ticket.id);
+    const attachments = await listAttachments(ticket.id);
+    const firstMsg = events.find((e) => e.body)?.body || "";
+    return {
+      ticket: formatTicketRow(ticket, firstMsg),
+      events,
+      attachments,
+    };
+  }
+
+  async function rowForAccount(idOrCode, account) {
+    const ticket = await resolveTicket(idOrCode);
+    const acctId = String(account?.id || account?.login_id || "");
+    if (!ticket || String(ticket.requester_id || "") !== acctId) return null;
+    return ticket;
+  }
+
+  async function rowById(idOrCode) {
+    return resolveTicket(idOrCode);
+  }
+
+  async function photoFor(ticketRow) {
+    if (!ticketRow?.id) return null;
+    const atts = await listAttachments(ticketRow.id);
+    const att = atts.find((a) => String(a.mime || "").startsWith("image/")) || atts[0];
+    if (!att) return null;
+    const abs = path.join(supportUploadRoot, String(ticketRow.id), att.stored_name);
+    return { abs, mime: att.mime, name: att.original_name };
+  }
+
+  async function partnerFollowUp(idOrCode, partner, messageText) {
+    const text = cleanText(messageText, 10_000);
+    if (!text) throw new SupportError("Please enter a message.", 400, "message");
+    const ticket = await resolveTicket(idOrCode);
+    const acctId = String(partner?.id || partner?.login_id || "");
+    if (!ticket || String(ticket.requester_id || "") !== acctId) {
+      throw new SupportError("Support ticket not found.", 404);
+    }
+    const ev = await addEvent({
+      ticketId: ticket.id,
+      eventType: "partner_followup",
+      actorRole: partner.role || "partner",
+      actorId: acctId,
+      actorName: partner.name || partner.login_id || "Partner",
+      body: text,
+    });
+    const updated = await getTicketById(ticket.id);
+    const detail = await getForAccount(ticket.id, partner);
+    return { ticket: formatTicketRow(updated, text), eventId: ev.id, detail };
+  }
+
+  async function adminReply(idOrCode, actor, messageText) {
+    const text = cleanText(messageText, 10_000);
+    if (!text) throw new SupportError("Please enter a reply.", 400, "message");
+    const ticket = await resolveTicket(idOrCode);
+    if (!ticket) throw new SupportError("Support ticket not found.", 404);
+    const ev = await addEvent({
+      ticketId: ticket.id,
+      eventType: "admin_reply",
+      actorRole: "admin",
+      actorId: String(actor || "admin"),
+      actorName: String(actor || "Admin"),
+      body: text,
+    });
+    const updated = await getTicketById(ticket.id);
+    return { ticket: formatTicketRow(updated, text), eventId: ev.id };
+  }
+
+  async function setStatus(idOrCode, actor, status, note = "") {
+    const ticket = await resolveTicket(idOrCode);
+    if (!ticket) throw new SupportError("Support ticket not found.", 404);
+    const updated = await updateStatus({
+      ticketId: ticket.id,
+      status,
+      actorRole: "admin",
+      actorId: String(actor || "admin"),
+      actorName: String(actor || "Admin"),
+      note,
+    });
+    const events = await listEvents(ticket.id);
+    const attachments = await listAttachments(ticket.id);
+    return {
+      ticket: formatTicketRow(updated, events.find((e) => e.body)?.body || ""),
+      events,
+      attachments,
+    };
+  }
+
+  async function create({
+    portalType = "",
+    signedIn = false,
+    account = null,
+    name = "",
+    email = "",
+    phone = "",
+    description = "",
+    photo = null,
+    submissionKey = null,
+  }) {
+    if (submissionKey) {
+      const existingEv = await db
+        .prepare("SELECT ticket_id FROM support_ticket_events WHERE message_id=?")
+        .get(`sub:${submissionKey}`);
+      if (existingEv?.ticket_id) {
+        const existingTicket = await getTicketById(existingEv.ticket_id);
+        if (existingTicket) {
+          return {
+            ticket: formatTicketRow(existingTicket, description),
+            duplicate: true,
+          };
+        }
+      }
+    }
+
+    const subject =
+      cleanText(description, 120) ||
+      `Support request from ${cleanText(name, 80) || "User"}`;
+    const bodyWithPhone = phone
+      ? `${cleanText(description, 9500)}\n\nContact Phone: ${cleanText(phone, 30)}`
+      : cleanText(description, 10_000);
+
+    const created = await createTicket({
+      subject,
+      category: portalType || "general",
+      priority: "normal",
+      body: bodyWithPhone,
+      requesterRole: portalType || (signedIn ? "partner" : "public"),
+      requesterId: account ? String(account.id || account.login_id || "") : "",
+      requesterName: name,
+      requesterEmail: email,
+      attachments: photo ? [photo] : [],
+      messageId: submissionKey ? `sub:${submissionKey}` : null,
+    });
+
+    return {
+      ticket: formatTicketRow(created.ticket, description),
+      duplicate: false,
+    };
   }
 
   async function listEvents(ticketId) {
@@ -449,13 +668,26 @@ export async function createSupportService({ db, uploadDir }) {
   }
 
   return {
+    TEXT_LIMITS,
+    create,
     createTicket,
     addEvent,
+    events: listEvents,
     updateStatus,
+    setStatus,
     getTicketById,
     getTicketByCode,
     ticketForMessageRefs,
     listTickets,
+    listForAdmin,
+    getForAdmin,
+    listForAccount,
+    getForAccount,
+    rowForAccount,
+    rowById,
+    photoFor,
+    partnerFollowUp,
+    adminReply,
     listEvents,
     saveAttachment,
     listAttachments,
