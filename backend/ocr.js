@@ -66,7 +66,9 @@ const NOISE_NAME_RE =
 function extractMobile(lines, partnerId = "") {
   for (const line of lines) {
     const normalized = cleanDigits(line).replace(/^(?:\+?91|0)[\s-]?/, "");
-    const m = normalized.match(/(?:^|[^\d])([6-9](?:[\s-]?[0-9]){9})(?:[^\d]|$)/);
+    const m = normalized.match(
+      /(?:^|[^\d])([6-9](?:[\s-]?[0-9]){9})(?:[^\d]|$)/,
+    );
     if (!m) continue;
     const digits = m[1].replace(/\D/g, "");
     if (/^[6-9]\d{9}$/.test(digits) && digits !== partnerId) {

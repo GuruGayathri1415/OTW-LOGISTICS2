@@ -4615,7 +4615,7 @@ function rrOpenForm() {
     rrPickFile(e.target, $("#rrSelfiePreview"), "selfie");
     if (e.target.files[0]) rrAutoFillFromScreenshot(e.target.files[0]);
   };
-  ["rrId", "rrName"].forEach((id) =>
+  ["rrId", "rrName", "rrMobile"].forEach((id) =>
     $("#" + id)?.addEventListener("input", (ev) =>
       ev.target.classList.remove("autofilled"),
     ),
@@ -4633,12 +4633,19 @@ function rrFormFail(field, message) {
 async function rrAutoFillFromScreenshot(file) {
   const idEl = $("#rrId"),
     nameEl = $("#rrName"),
+    mobileEl = $("#rrMobile"),
     note = $("#rrOcrNote");
   if (!file || !idEl || !nameEl || !note) return;
   if (!RR_IMAGE_TYPES.includes(file.type) || file.size > RR_MAX_BYTES) return;
-  if (idEl.value.trim() && nameEl.value.trim()) return;
+  if (
+    idEl.value.trim() &&
+    nameEl.value.trim() &&
+    (!mobileEl || mobileEl.value.trim())
+  )
+    return;
   note.className = "autofill-status busy";
-  note.textContent = "Reading the Rider ID and name from the screenshot…";
+  note.textContent =
+    "Reading the Rider ID, name, and mobile from the screenshot…";
   try {
     const fd = new FormData();
     fd.append("file", file, file.name);
@@ -4660,10 +4667,16 @@ async function rrAutoFillFromScreenshot(file) {
       nameEl.classList.add("autofilled");
       filled.push("Rider Name");
     }
+    const cleanMobile = rrCleanMobile(out.read?.mobile || "");
+    if (cleanMobile && mobileEl && !mobileEl.value.trim()) {
+      mobileEl.value = cleanMobile;
+      mobileEl.classList.add("autofilled");
+      filled.push("Mobile Number");
+    }
     note.className = "autofill-status " + (filled.length ? "ok" : "warn");
     note.textContent = filled.length
-      ? `${filled.join(" and ")} filled in from the screenshot. Please check before saving.`
-      : out.read?.partnerId || out.read?.name
+      ? `${filled.join(", ")} filled in from the screenshot. Please check before saving.`
+      : out.read?.partnerId || out.read?.name || cleanMobile
         ? ""
         : "No Partner ID was found in this image. Please type the details.";
   } catch (e) {
