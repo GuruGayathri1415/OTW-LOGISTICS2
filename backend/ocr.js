@@ -52,7 +52,8 @@ function getWorker() {
 
 // Matches "Partner ID: 28588592", "Rider ID - 123456", or standalone "ID: 8392252".
 const ID_RE =
-  /(?:(?:partner|rider)\s*)?[i1l|]\s*d\s*(?:no\.?|number)?\s*[:;.\-]\s*([0-9OoIl|]{5,12})/i;
+  /(?:(?:partner|rider)\s*)?[i1l|]\s*d\s*(?:no\.?|number)?\s*[:;.\-]\s*([0-9OoIl|SsBb]{5,12})/i;
+
 const cleanDigits = (s) =>
   String(s || "")
     .replace(/[Oo]/g, "0")
@@ -64,15 +65,24 @@ const NOISE_NAME_RE =
   /^(?:my\s+profile|profile|personal\s+info|my\s+documents|shadowfax(?:\s+kit)?|terms(?:\s+and\s+conditions)?|whatsapp(?:\s+opt\s+in)?|sign\s+out|group(?:\s*[:\-].*)?|id(?:\s*[:\-].*)?)$/i;
 
 function extractMobile(lines, partnerId = "") {
-  for (const line of lines) {
-    const normalized = cleanDigits(line).replace(/^(?:\+?91|0)[\s-]?/, "");
-    const m = normalized.match(
-      /(?:^|[^\d])([6-9](?:[\s-]?[0-9]){9})(?:[^\d]|$)/,
+  const candidates = [...lines];
+  for (let i = 0; i < lines.length - 1; i++) {
+    candidates.push(`${lines[i]} ${lines[i + 1]}`);
+  }
+
+  for (const rawLine of candidates) {
+    const line = cleanDigits(rawLine).replace(
+      /(?:\+?91[\s-]?|(?<!\d)0(?=\s*[6-9]))/g,
+      " ",
     );
-    if (!m) continue;
-    const digits = m[1].replace(/\D/g, "");
-    if (/^[6-9]\d{9}$/.test(digits) && digits !== partnerId) {
-      return digits;
+    const matches = line.matchAll(
+      /(?:^|[^\d])([6-9](?:[\s-]?[0-9]){9})(?:[^\d]|$)/g,
+    );
+    for (const m of matches) {
+      const digits = m[1].replace(/\D/g, "");
+      if (/^[6-9]\d{9}$/.test(digits) && digits !== partnerId) {
+        return digits;
+      }
     }
   }
   return "";
