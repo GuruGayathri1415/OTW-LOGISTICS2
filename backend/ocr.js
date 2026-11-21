@@ -1,6 +1,11 @@
-// Reads the rider's Partner ID (and name) from a screenshot of the delivery app, e.g. the menu showing
+// Reads the rider's Partner ID / Rider ID (and name, plus mobile if present) from a screenshot of the
+// delivery app, e.g.:
 //   "Kandi Nithin"
 //   "Partner ID: 28588592"
+// or:
+//   "Ramesh Mani"
+//   "ID: 8392252"
+//   "7812870644"
 // Text recognition (Tesseract) runs here on the server; screenshots are not sent to any outside service.
 // Text recognition can misread a character now and then, so the portal always asks the user to check
 // the filled-in values.
@@ -45,16 +50,32 @@ function getWorker() {
   return workerPromise;
 }
 
+// Matches "Partner ID: 28588592", "Rider ID - 123456", or standalone "ID: 8392252".
 const ID_RE =
-  /(?:partner|rider)\s*[i1l|]\s*d\s*(?:no\.?|number)?\s*[:;.\-]?\s*([0-9OoIl|]{5,12})/i;
+  /(?:(?:partner|rider)\s*)?[i1l|]\s*d\s*(?:no\.?|number)?\s*[:;.\-]\s*([0-9OoIl|]{5,12})/i;
 const cleanDigits = (s) => s.replace(/[Oo]/g, "0").replace(/[Il|]/g, "1");
 
-// Finds "Partner ID: 12345678" and the name written on the line above it.
+const NOISE_NAME_RE =
+  /^(?:my\s+profile|profile|personal\s+info|my\s+documents|shadowfax(?:\s+kit)?|terms(?:\s+and\s+conditions)?|whatsapp(?:\s+opt\s+in)?|sign\s+out|group(?:\s*[:\-].*)?|id(?:\s*[:\-].*)?)$/i;
+
+function extractMobile(lines) {
+  for (const line of lines) {
+    const digitsOnly = line.replace(/\D/g, "");
+    if (/^[6-9]\d{9}$/.test(digitsOnly)) return digitsOnly;
+    const m = line.match(/\b([6-9]\d{9})\b/);
+    if (m) return m[1];
+  }
+  return "";
+}
+
+// Finds ID and the name written on a nearby line above it (plus mobile if present).
 export function parseRiderText(text) {
   const lines = String(text || "")
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
+  const mobile = extractMobile(lines);
+
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(ID_RE);
     if (!m) continue;
@@ -65,6 +86,7 @@ export function parseRiderText(text) {
         .replace(/^[^A-Za-z]+|[^A-Za-z.]+$/g, "")
         .replace(/\s+/g, " ")
         .trim();
+      if (!candidate || NOISE_NAME_RE.test(candidate)) continue;
       const letters = (candidate.match(/[A-Za-z]/g) || []).length;
       if (
         candidate.length >= 3 &&
@@ -77,9 +99,9 @@ export function parseRiderText(text) {
         break;
       }
     }
-    return { partnerId, name };
+    return { partnerId, name, mobile };
   }
-  return { partnerId: "", name: "" };
+  return { partnerId: "", name: "", mobile };
 }
 
 async function recognise(buffer, psm) {
@@ -89,7 +111,7 @@ async function recognise(buffer, psm) {
   return parseRiderText(data.text);
 }
 
-// Returns {partnerId, name}; empty strings when nothing could be read. Never throws.
+// Returns {partnerId, name, mobile}; empty strings when nothing could be read. Never throws.
 export function readRiderScreenshot(buffer) {
   const job = queue.then(async () => {
     // "Sparse text" reads app screens best; the general mode is a second try.
@@ -100,12 +122,12 @@ export function readRiderScreenshot(buffer) {
   queue = job.catch(() => {});
   const timeout = new Promise((resolve) =>
     setTimeout(
-      () => resolve({ partnerId: "", name: "", timedOut: true }),
+      () => resolve({ partnerId: "", name: "", mobile: "", timedOut: true }),
       TIMEOUT_MS,
     ).unref?.(),
   );
   return Promise.race([job, timeout]).catch((err) => {
     console.error("Screenshot reading failed:", err.message);
-    return { partnerId: "", name: "" };
+    return { partnerId: "", name: "", mobile: "" };
   });
 }
