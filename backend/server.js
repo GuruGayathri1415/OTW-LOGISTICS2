@@ -235,21 +235,7 @@ const isTrustedOrigin = (req, origin) =>
   TRUSTED_ORIGINS.has(origin) ||
   (isKnownHost(req) && origin === `${req.protocol}://${req.get("host")}`);
 
-let warnedHost = false;
-app.use("/api", (req, res, next) => {
-  if (isKnownHost(req)) return next();
-  if (!warnedHost) {
-    warnedHost = true;
-    console.warn(
-      `Refused API request for unknown address "${hostnameOf(req)}". If this is your site's address, set PUBLIC_URL (or ALLOWED_HOSTS) in backend/.env.`,
-    );
-  }
-  res.status(421).json({
-    error:
-      "This server is not set up for this web address. The site owner must add it to PUBLIC_URL in backend/.env.",
-  });
-});
-
+// Set CORS headers before host checks and rate limits so error responses keep them.
 app.use((req, res, next) => {
   const origin = String(req.headers.origin || "");
   res.setHeader("Vary", "Origin");
@@ -268,6 +254,21 @@ app.use((req, res, next) => {
   );
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
+});
+
+let warnedHost = false;
+app.use("/api", (req, res, next) => {
+  if (isKnownHost(req)) return next();
+  if (!warnedHost) {
+    warnedHost = true;
+    console.warn(
+      `Refused API request for unknown address "${hostnameOf(req)}". If this is your site's address, set PUBLIC_URL (or ALLOWED_HOSTS) in backend/.env.`,
+    );
+  }
+  res.status(421).json({
+    error:
+      "This server is not set up for this web address. The site owner must add it to PUBLIC_URL in backend/.env.",
+  });
 });
 
 const PUBLIC_POSTS = new Set([
@@ -294,7 +295,7 @@ app.use(
   "/api",
   rateLimit({
     windowMs: 60_000,
-    max: 300,
+    max: 1500,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many requests. Please wait a minute and try again." },
@@ -2047,7 +2048,7 @@ app.post("/api/portal/files", portalGuard, (req, res) => {
 
 const screenshotReadLimiter = rateLimit({
   windowMs: 10 * 60_000,
-  max: 60,
+  max: 200,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many screenshots were read. Please wait a few minutes." },
