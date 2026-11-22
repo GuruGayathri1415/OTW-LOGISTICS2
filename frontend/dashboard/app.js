@@ -118,11 +118,18 @@ function updateSupportNavRedAlert(openCount) {
 
   btn.classList.toggle("support-has-alert", supportAlertOpenCount > 0);
 
-  let badge = btn.querySelector(".support-red-badge");
+  const existingBadges = btn.querySelectorAll(
+    ".support-red-alert, .support-red-badge",
+  );
   if (supportAlertOpenCount <= 0) {
-    badge?.remove();
+    existingBadges.forEach((el) => el.remove());
     return;
   }
+
+  let badge = btn.querySelector(".support-red-alert");
+  existingBadges.forEach((el) => {
+    if (el !== badge) el.remove();
+  });
 
   if (!badge) {
     badge = document.createElement("span");
