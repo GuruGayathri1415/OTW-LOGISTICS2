@@ -533,8 +533,7 @@ if (resetToken) {
   })();
 }
 
-if ($("#menuBtn"))
-  $("#menuBtn").onclick = () => $("#sidebar")?.classList.toggle("open");
+if ($("#menuBtn")) $("#menuBtn").onclick = () => $("#sidebar")?.classList.toggle("open");
 $$(".nav").forEach(
   (n) =>
     (n.onclick = () => {
@@ -562,8 +561,7 @@ function render(page) {
     payments: payments,
     whatsapp: whatsapp,
     partners: partners,
-    notifications:
-      typeof notificationsPage === "function" ? notificationsPage : null,
+    notifications: typeof notificationsPage === "function" ? notificationsPage : null,
     reports: reports,
     settings: settings,
   };
@@ -590,8 +588,7 @@ function render(page) {
   if (page === "whatsapp") bindWhatsApp();
   if (page === "partners") bindPartners();
   if (page === "settings") bindSettings();
-  if (page === "notifications" && typeof bindNotifications === "function")
-    bindNotifications();
+  if (page === "notifications" && typeof bindNotifications === "function") bindNotifications();
   if (page === "reports") bindReports();
   if (typeof updatePartnerNavCount === "function") updatePartnerNavCount();
   if (supportAlertOpenCount > 0)
@@ -773,12 +770,8 @@ function bindDashboard() {
     syncPartnerApplications();
     await Promise.all([
       loadWeeklyPayments(),
-      typeof rrLoad === "function"
-        ? rrLoad({ quiet: true })
-        : Promise.resolve(),
-      typeof loadHubs === "function"
-        ? loadHubs({ quiet: true })
-        : Promise.resolve(true),
+      typeof rrLoad === "function" ? rrLoad({ quiet: true }) : Promise.resolve(),
+      typeof loadHubs === "function" ? loadHubs({ quiet: true }) : Promise.resolve(true),
       checkSupportTicketsAlert({ notifyOnIncrease: false }),
     ]);
     if (currentPage === "dashboard") render("dashboard");
@@ -960,7 +953,7 @@ async function syncRiderMasterDirectory() {
     }
     try {
       const registrationResponse = await rrCall(rrApiUrl());
-      rrItems = registrationResponse.items || [];
+      rrItems = rrExtractList(registrationResponse);
       for (const master of matched) {
         const regMatches = rrItemsArray().filter(
           (x) =>
@@ -982,7 +975,9 @@ async function syncRiderMasterDirectory() {
           method: "PUT",
           body: fd,
         });
-        rrItems = rrItemsArray().map((x) => (x.id === reg.id ? out.item : x));
+        const updatedReg = rrExtractItem(out);
+        if (updatedReg)
+          rrItems = rrItemsArray().map((x) => (x.id === reg.id ? updatedReg : x));
         remoteChanged++;
       }
     } catch (e) {
@@ -1070,11 +1065,12 @@ function riderEditModal(r, reg = null) {
           method: "PUT",
           body: fd,
         });
-        savedRegistration = out.item;
+        savedRegistration = rrExtractItem(out);
       } else {
         const created = await rrCall(rrApiUrl(), { method: "POST", body: fd });
+        const createdItem = rrExtractItem(created);
         const approved = await rrCall(
-          rrApiUrl("/" + encodeURIComponent(created.item.id) + "/status"),
+          rrApiUrl("/" + encodeURIComponent(createdItem.id) + "/status"),
           {
             method: "POST",
             body: {
@@ -1083,7 +1079,7 @@ function riderEditModal(r, reg = null) {
             },
           },
         );
-        savedRegistration = approved.item;
+        savedRegistration = rrExtractItem(approved);
       }
       if (savedRegistration)
         rrItems = [
@@ -1171,9 +1167,7 @@ window.viewRider = async (id) => {
     weekly = [];
   try {
     await Promise.all([
-      typeof rrLoad === "function"
-        ? rrLoad({ quiet: true })
-        : Promise.resolve(),
+      typeof rrLoad === "function" ? rrLoad({ quiet: true }) : Promise.resolve(),
       loadAdminDocs(),
     ]);
     registration =
@@ -1292,9 +1286,7 @@ function docsOfRider(r) {
       id: d.id,
       type: d.type,
       file: d.name,
-      date: d.createdAt
-        ? new Date(d.createdAt).toLocaleDateString("en-IN")
-        : "",
+      date: d.createdAt ? new Date(d.createdAt).toLocaleDateString("en-IN") : "",
       server: true,
     }));
   const legacy = (db.documents || [])
@@ -1365,8 +1357,7 @@ function documentsListHtml() {
   return secs
     .map(({ r, docs }) => {
       const reg = regs.find(
-        (x) =>
-          x && normalizeRiderLinkId(x.riderId) === normalizeRiderLinkId(r.id),
+        (x) => x && normalizeRiderLinkId(x.riderId) === normalizeRiderLinkId(r.id),
       );
       const extra = reg
         ? `<div class="uploaded-doc"><span><b>Rider Selfie / Screenshot</b> • ${esc(reg.selfie?.name || "Secure file")}</span><button class="btn-sm" data-reg-doc="selfie" data-reg-id="${esc(reg.id)}" data-reg-name="${esc(r.name)}">View</button></div><div class="uploaded-doc"><span><b>Aadhaar Card</b> • ${esc(reg.aadhaar?.name || "Secure file")}</span><button class="btn-sm" data-reg-doc="aadhaar" data-reg-id="${esc(reg.id)}" data-reg-name="${esc(r.name)}">Preview</button></div>`
@@ -4191,6 +4182,43 @@ const RR_FORM_FIELD = {
 function rrApiUrl(path = "") {
   return PARTNER_API_BASE + "/api/rider-registrations" + path + "?portal=admin";
 }
+function rrExtractItem(out) {
+  if (!out || typeof out !== "object") return null;
+  const candidate = out.item || out.registration || out.data || null;
+  if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+    return {
+      ...candidate,
+      id: candidate.id || candidate._id || "",
+      applicationId: candidate.applicationId || candidate.application_id || "",
+      riderId: candidate.riderId || candidate.rider_id || "",
+      riderName: candidate.riderName || candidate.rider_name || "",
+      mobileNumber:
+        candidate.mobileNumber ||
+        candidate.mobile_number ||
+        candidate.mobile ||
+        "",
+      hubPincode: candidate.hubPincode || candidate.hub_pincode || "",
+      hubLocation: candidate.hubLocation || candidate.hub_location || "",
+      status: String(candidate.status || "PENDING").toUpperCase(),
+      createdAt: candidate.createdAt || candidate.created_at || "",
+    };
+  }
+  return null;
+}
+function rrExtractList(out) {
+  const raw = Array.isArray(out)
+    ? out
+    : Array.isArray(out?.items)
+      ? out.items
+      : Array.isArray(out?.registrations)
+        ? out.registrations
+        : Array.isArray(out?.rows)
+          ? out.rows
+          : Array.isArray(out?.data)
+            ? out.data
+            : [];
+  return raw.map((item) => rrExtractItem({ item })).filter(Boolean);
+}
 function rrStatusBadge(s) {
   return `<span class="badge ${RR_STATUS_CLASS[s] || "info"}">${esc(s)}</span>`;
 }
@@ -4369,7 +4397,7 @@ async function rrLoad({ quiet = false } = {}) {
   try {
     const out = await rrCall(rrApiUrl());
     const before = rrPendingCount();
-    rrItems = Array.isArray(out.items) ? out.items : [];
+    rrItems = rrExtractList(out);
     announceNewPartnerRiders();
     rrRender();
     if (
@@ -4423,18 +4451,9 @@ function rrRender() {
   const f = rrFilters();
   const list = items.filter(
     (r) =>
-      (!f.id ||
-        String(r.riderId || "")
-          .toLowerCase()
-          .includes(f.id)) &&
-      (!f.name ||
-        String(r.riderName || "")
-          .toLowerCase()
-          .includes(f.name)) &&
-      (!f.hub ||
-        String(r.hubLocation || "")
-          .toLowerCase()
-          .includes(f.hub)) &&
+      (!f.id || String(r.riderId || "").toLowerCase().includes(f.id)) &&
+      (!f.name || String(r.riderName || "").toLowerCase().includes(f.name)) &&
+      (!f.hub || String(r.hubLocation || "").toLowerCase().includes(f.hub)) &&
       (!f.status || r.status === f.status),
   );
   body.innerHTML = list.map(rrRow).join("");
@@ -4568,7 +4587,10 @@ function rrConfirmDecision(item, status) {
         rrApiUrl("/" + encodeURIComponent(item.id) + "/status"),
         { method: "POST", body: { status, remarks } },
       );
-      rrItems = rrItemsArray().map((x) => (x.id === item.id ? out.item : x));
+      const updatedItem = rrExtractItem(out) || out.item;
+      rrItems = rrItemsArray().map((x) =>
+        x.id === item.id ? updatedItem : x,
+      );
       closeModal();
       rrRender();
       if (!syncRegisteredRiders() && currentPage === "riders") paintRiders();
@@ -4583,7 +4605,8 @@ function rrConfirmDecision(item, status) {
 }
 async function rrViewDetail(id) {
   try {
-    const r = (await rrCall(rrApiUrl("/" + encodeURIComponent(id)))).item;
+    const out = await rrCall(rrApiUrl("/" + encodeURIComponent(id)));
+    const r = rrExtractItem(out) || out.item;
     rrItems = rrItemsArray().map((x) => (x.id === r.id ? r : x));
     const history = (r.history || [])
       .map(
@@ -4777,10 +4800,16 @@ async function rrSubmitForm(e) {
   btn.textContent = "Saving…";
   try {
     const out = await rrCall(rrApiUrl(), { method: "POST", body: fd });
-    rrItems = [out.item, ...rrItemsArray().filter((x) => x.id !== out.item.id)];
+    const savedItem = rrExtractItem(out);
+    if (savedItem) {
+      rrItems = [
+        savedItem,
+        ...rrItemsArray().filter((x) => x && x.id !== savedItem.id),
+      ];
+    }
     closeModal();
     toast(
-      `${out.item.applicationId} saved as PENDING. Showing in Client Members.`,
+      `${savedItem?.applicationId || savedItem?.riderId || "Registration"} saved as ${savedItem?.status || "PENDING"}. Showing in Client Members.`,
     );
     render("client");
     setTimeout(
