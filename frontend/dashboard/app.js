@@ -1539,7 +1539,7 @@ window.openDocumentForm = ({ riderId = "", replaceId = "" } = {}) => {
       riderField +
       `<div class="field"><label for="dType">Document Type</label><select id="dType">${typeOptions}</select></div>` +
       `<div class="field span2"><label for="dFile">Choose File</label><div class="doc-pick"><label class="file-picker"><input type="file" id="dFile" accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf" hidden><span>Choose file</span></label><span id="dFileName" class="file-name">${isReplace ? `Current: ${esc(existing.name)}` : "No file chosen"}</span></div><small class="hint">${isReplace ? "Leave empty to keep the current file. " : ""}JPG, JPEG, PNG, WEBP or PDF, up to 5 MB.</small></div>` +
-      `<div class="field span2"><label for="dSelfie">Rider Selfie / Screenshot <span class="muted">(optional)</span></label><div class="doc-pick"><label class="file-picker"><input type="file" id="dSelfie" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden><span>Choose image</span></label><span id="dSelfieName" class="file-name">${isReplace && existing.selfie ? `Current: ${esc(existing.selfie.name)}` : "No file chosen"}</span></div><img id="dSelfiePreview" class="doc-selfie-preview" alt="Selected selfie or screenshot preview" hidden><small class="hint">${isReplace ? "Leave empty to keep the current selfie. " : ""}JPG, JPEG, PNG or WEBP, up to 5 MB.</small></div>` +
+      `<div class="field span2"><label for="dSelfie">Rider Selfie / Screenshot <span class="muted">(optional)</span></label><div class="doc-pick"><label class="file-picker"><input type="file" id="dSelfie" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden><span>Choose image</span></label><span id="dSelfieName" class="file-name">${isReplace && existing.selfie ? `Current: ${esc(existing.selfie.name)}` : "No file chosen"}</span></div><img id="dSelfiePreview" class="doc-selfie-preview" alt="" hidden><small class="hint">${isReplace ? "Leave empty to keep the current selfie. " : ""}JPG, JPEG, PNG or WEBP, up to 5 MB.</small></div>` +
       `<p id="docError" class="form-message error span2" role="alert"></p>` +
       `<div class="modal-actions span2"><button type="button" class="ghost" id="docCancel">Cancel</button><button type="submit" class="primary" id="docSave">${isReplace ? "Save changes" : "Upload"}</button></div></form>`,
   );
@@ -1556,6 +1556,13 @@ function wireDocumentForm(existing) {
   const clearSelfieUrl = () => {
     if (selfieUrl) URL.revokeObjectURL(selfieUrl);
     selfieUrl = "";
+  };
+  const resetSelfiePreview = (img) => {
+    clearSelfieUrl();
+    if (!img) return;
+    img.hidden = true;
+    img.removeAttribute("src");
+    img.alt = "";
   };
 
   if (!existing) {
@@ -1659,22 +1666,23 @@ function wireDocumentForm(existing) {
       "JPG, JPEG, PNG or WEBP",
     );
     const img = $("#dSelfiePreview");
-    clearSelfieUrl();
     if (problem) {
       e.target.value = "";
-      img.hidden = true;
+      resetSelfiePreview(img);
       $("#dSelfieName").textContent = existing?.selfie
         ? `Current: ${existing.selfie.name}`
         : "No file chosen";
       return err(problem);
     }
     if (f) {
+      clearSelfieUrl();
       selfieUrl = URL.createObjectURL(f);
       img.src = selfieUrl;
+      img.alt = "Selected selfie or screenshot preview";
       img.hidden = false;
       $("#dSelfieName").textContent = f.name;
     } else {
-      img.hidden = true;
+      resetSelfiePreview(img);
       $("#dSelfieName").textContent = existing?.selfie
         ? `Current: ${existing.selfie.name}`
         : "No file chosen";
@@ -1682,7 +1690,7 @@ function wireDocumentForm(existing) {
     err("");
   });
   $("#docCancel").addEventListener("click", () => {
-    clearSelfieUrl();
+    resetSelfiePreview($("#dSelfiePreview"));
     closeModal();
   });
   $("#docForm").addEventListener("input", () => err(""));
@@ -1749,7 +1757,7 @@ function wireDocumentForm(existing) {
       if (!res.ok)
         throw new Error(out.error || "Upload failed (" + res.status + ")");
       upsertDocItem(out.item);
-      clearSelfieUrl();
+      resetSelfiePreview($("#dSelfiePreview"));
       closeModal();
       render("documents");
       toast(
