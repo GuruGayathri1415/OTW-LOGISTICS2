@@ -83,17 +83,19 @@ export function registerRiderRegistrationRoutes(
     }
   });
 
-  app.get("/api/rider-registrations", guard, (req, res) => {
+  app.get("/api/rider-registrations", guard, async (req, res) => {
     try {
-      res.json({ ok: true, items: service.list(req.actor) });
+      const items = await service.list(req.actor);
+      res.json({ ok: true, items });
     } catch (err) {
       fail(res, err, "Could not load rider registrations:");
     }
   });
 
-  app.get("/api/rider-registrations/:id", guard, (req, res) => {
+  app.get("/api/rider-registrations/:id", guard, async (req, res) => {
     try {
-      res.json({ ok: true, item: service.get(req.actor, req.params.id) });
+      const item = await service.get(req.actor, req.params.id);
+      res.json({ ok: true, item });
     } catch (err) {
       fail(res, err, "Could not load the rider registration:");
     }
@@ -103,7 +105,7 @@ export function registerRiderRegistrationRoutes(
     upload.fields([
       { name: "selfie", maxCount: 1 },
       { name: "aadhaar", maxCount: 1 },
-    ])(req, res, (err) => {
+    ])(req, res, async (err) => {
       if (err) {
         return res.status(400).json({
           error:
@@ -117,7 +119,7 @@ export function registerRiderRegistrationRoutes(
           selfie: req.files?.selfie?.[0],
           aadhaar: req.files?.aadhaar?.[0],
         };
-        const item = service.create(req.actor, req.body || {}, files);
+        const item = await service.create(req.actor, req.body || {}, files);
         res.status(201).json({ ok: true, item });
       } catch (error) {
         fail(res, error, "Could not save the rider registration:");
@@ -129,7 +131,7 @@ export function registerRiderRegistrationRoutes(
     upload.fields([
       { name: "selfie", maxCount: 1 },
       { name: "aadhaar", maxCount: 1 },
-    ])(req, res, (err) => {
+    ])(req, res, async (err) => {
       if (err) {
         return res.status(400).json({
           error:
@@ -143,22 +145,31 @@ export function registerRiderRegistrationRoutes(
           selfie: req.files?.selfie?.[0],
           aadhaar: req.files?.aadhaar?.[0],
         };
-        res.json({
-          ok: true,
-          item: service.update(req.actor, req.params.id, req.body || {}, files),
-        });
+        const item = await service.update(
+          req.actor,
+          req.params.id,
+          req.body || {},
+          files,
+        );
+        res.json({ ok: true, item });
       } catch (error) {
         fail(res, error, "Could not update the rider profile:");
       }
     });
   });
 
-  app.post("/api/rider-registrations/:id/status", guard, (req, res) => {
+  app.post("/api/rider-registrations/:id/status", guard, async (req, res) => {
     try {
-      const item = service.setStatus(req.actor, req.params.id, req.body || {});
+      const item = await service.setStatus(
+        req.actor,
+        req.params.id,
+        req.body || {},
+      );
       if (item?.status === "APPROVED" && typeof onApproved === "function") {
         try {
-          onApproved(String(req.actor?.identity || req.actor?.role || ""));
+          await onApproved(
+            String(req.actor?.identity || req.actor?.role || ""),
+          );
         } catch (err) {
           console.error(
             "Could not re-check pending payment rows after approval:",
@@ -172,9 +183,13 @@ export function registerRiderRegistrationRoutes(
     }
   });
 
-  app.get("/api/rider-registrations/:id/files/:kind", guard, (req, res) => {
+  app.get("/api/rider-registrations/:id/files/:kind", guard, async (req, res) => {
     try {
-      const file = service.fileFor(req.actor, req.params.id, req.params.kind);
+      const file = await service.fileFor(
+        req.actor,
+        req.params.id,
+        req.params.kind,
+      );
       res.set({
         "Content-Type": file.type,
         "Content-Disposition": `inline; filename="${String(file.name).replace(/["\\]/g, "")}"`,
