@@ -4406,7 +4406,9 @@ function rrRender() {
   paintPendingRiders();
   const body = document.getElementById("regRows");
   if (!body) return;
-  const items = rrItemsArray();
+  const items = rrItemsArray().filter(
+    (r) => r && r.id && (r.riderId || r.riderName || r.applicationId),
+  );
   const count = (s) => items.filter((r) => r && r.status === s).length;
   const stats = {
     regStatTotal: items.length,
@@ -4421,7 +4423,6 @@ function rrRender() {
   const f = rrFilters();
   const list = items.filter(
     (r) =>
-      r &&
       (!f.id ||
         String(r.riderId || "")
           .toLowerCase()
@@ -4446,23 +4447,24 @@ function rrRender() {
   }
 }
 function rrRow(r) {
+  if (!r || !r.id) return "";
   const id = esc(r.id),
     acts = [
-      `<button class="btn-sm" data-rr-act="view" data-rr-id="${id}">View</button>`,
+      `<button type="button" class="btn-sm" data-rr-act="view" data-rr-id="${id}">View</button>`,
     ];
   if (r.status !== "APPROVED")
     acts.push(
-      `<button class="btn-sm accept" data-rr-act="APPROVED" data-rr-id="${id}">✓ Approve</button>`,
+      `<button type="button" class="btn-sm accept" data-rr-act="APPROVED" data-rr-id="${id}">✓ Approve</button>`,
     );
   if (r.status !== "REJECTED")
     acts.push(
-      `<button class="btn-sm danger" data-rr-act="REJECTED" data-rr-id="${id}">✕ Reject</button>`,
+      `<button type="button" class="btn-sm danger" data-rr-act="REJECTED" data-rr-id="${id}">✕ Reject</button>`,
     );
   return (
-    `<tr><td><b>${esc(r.riderId)}</b><br><small class="muted">${esc(r.applicationId)}</small></td><td>${esc(r.riderName)}</td><td>${esc(r.mobileNumber)}</td><td>${esc(r.hubPincode)}</td><td>${esc(r.hubLocation)}</td>` +
-    `<td><button class="btn-sm" data-rr-doc="selfie" data-rr-id="${id}" data-rr-title="Selfie">View selfie</button></td>` +
-    `<td><button class="btn-sm" data-rr-doc="aadhaar" data-rr-id="${id}" data-rr-title="Aadhaar">Preview Aadhaar</button></td>` +
-    `<td>${esc(r.appliedBy)}${r.ownerLoginId ? `<br><small class="muted">${esc(r.ownerLoginId)}${r.ownerName ? "<br>" + esc(r.ownerName) : ""}</small>` : ""}</td><td>${esc(rrDate(r.createdAt))}</td><td>${rrStatusBadge(r.status)}</td><td><div class="mini-actions">${acts.join("")}</div></td></tr>`
+    `<tr><td><b>${esc(r.riderId || "—")}</b><br><small class="muted">${esc(r.applicationId || "")}</small></td><td>${esc(r.riderName || "—")}</td><td>${esc(r.mobileNumber || "—")}</td><td>${esc(r.hubPincode || "—")}</td><td>${esc(r.hubLocation || "—")}</td>` +
+    `<td><button type="button" class="btn-sm" data-rr-doc="selfie" data-rr-id="${id}" data-rr-title="Selfie">View selfie</button></td>` +
+    `<td><button type="button" class="btn-sm" data-rr-doc="aadhaar" data-rr-id="${id}" data-rr-title="Aadhaar">Preview Aadhaar</button></td>` +
+    `<td>${esc(r.appliedBy || "—")}${r.ownerLoginId ? `<br><small class="muted">${esc(r.ownerLoginId)}${r.ownerName ? "<br>" + esc(r.ownerName) : ""}</small>` : ""}</td><td>${esc(rrDate(r.createdAt))}</td><td>${rrStatusBadge(r.status || "PENDING")}</td><td><div class="mini-actions">${acts.join("")}</div></td></tr>`
   );
 }
 function rrBindClientPage() {
@@ -4486,14 +4488,21 @@ function rrBindClientPage() {
 }
 function rrTableClick(e) {
   const b = e.target.closest("button[data-rr-act],button[data-rr-doc]");
-  if (!b) return;
-  const item = rrItemsArray().find((x) => x.id === b.dataset.rrId);
-  if (!item) return;
+  if (!b || !b.dataset.rrId) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const item = rrItemsArray().find(
+    (x) => x && String(x.id) === String(b.dataset.rrId),
+  );
+  if (!item) {
+    toast("Registration record not found. Click Refresh and try again.");
+    return;
+  }
   if (b.dataset.rrDoc)
     return rrOpenDocument(
       item.id,
       b.dataset.rrDoc,
-      `${b.dataset.rrTitle} · ${item.riderName} (${item.riderId})`,
+      `${b.dataset.rrTitle} · ${item.riderName || item.riderId} (${item.riderId || item.id})`,
     );
   if (b.dataset.rrAct === "view") return rrViewDetail(item.id);
   rrConfirmDecision(item, b.dataset.rrAct);
