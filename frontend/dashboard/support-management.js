@@ -24,6 +24,41 @@ const SUP_TICKET_STATUSES = [
   "Closed",
 ];
 
+function normalizeSupportTicket(t = {}) {
+  const ticketId = t.ticketId || t.ticket_no || t.ticket_code || t.id || "";
+  const portalType =
+    t.portalType || t.portal_type || t.requester_role || "Email";
+  const customerName =
+    t.customerName || t.customer_name || t.requester_name || "—";
+  const submittedAt =
+    t.submittedAt || t.submitted_at || t.createdAt || t.created_at || "";
+  const accountLogin =
+    t.accountLogin || t.account_login || t.requester_id || "";
+  const phone = t.phone || t.contactNumber || t.mobile || "";
+  const description = t.description || t.subject || "";
+
+  return {
+    ...t,
+    ticketId,
+    portalType,
+    customerName,
+    submittedAt,
+    accountLogin,
+    phone,
+    description,
+  };
+}
+
+function normalizeSupportEvent(ev = {}) {
+  return {
+    ...ev,
+    kind: ev.kind || ev.event_type || "",
+    authorRole: ev.authorRole || ev.actor_role || "",
+    author: ev.author || ev.actor_name || ev.actor_id || "",
+    createdAt: ev.createdAt || ev.created_at || "",
+  };
+}
+
 async function supRequest(path, { method = "GET", body } = {}) {
   let r;
   try {
@@ -125,7 +160,7 @@ async function supLoad() {
     if (supStore.portal) qs.set("portal", supStore.portal);
     if (supStore.q.trim()) qs.set("q", supStore.q.trim());
     const out = await supRequest("/tickets?" + qs.toString());
-    supStore.tickets = out.tickets || [];
+    supStore.tickets = (out.tickets || []).map(normalizeSupportTicket);
     supStore.summary = out.summary || null;
     supStore.error = "";
   } catch (e) {
@@ -179,8 +214,8 @@ function supPaint() {
     if (el) el.textContent = supStore.summary ? v : "—";
   };
   set("supTotal", s.total);
-  set("supNew", s.new);
-  set("supPending", s.pending);
+  set("supNew", s.new ?? s.open);
+  set("supPending", s.pending ?? s.waitingOnUser);
   set("supProgress", s.inProgress);
   set("supResolved", s.resolved);
   set("supFailed", s.failedEmails);
@@ -195,7 +230,8 @@ function supPaint() {
   $("#supCount").textContent = `${supStore.tickets.length} shown`;
   $("#supRows").innerHTML = supStore.tickets.length
     ? supStore.tickets
-        .map((t) => {
+        .map((raw) => {
+          const t = normalizeSupportTicket(raw);
           const e = t.newTicketEmail;
           const emailCell = e
             ? `${badgeFor(e.status)}${e.lastError ? `<br><small class="muted" title="${esc(e.lastError)}">${esc(e.lastError.slice(0, 60))}</small>` : ""}`
@@ -229,7 +265,9 @@ async function supOpen(id, focusReply = false) {
 }
 
 function supRenderModal(focusReply) {
-  const { ticket: t, events, emailJobs = [] } = supStore.open;
+  const t = normalizeSupportTicket(supStore.open.ticket || {});
+  const events = (supStore.open.events || []).map(normalizeSupportEvent);
+  const emailJobs = supStore.open.emailJobs || [];
   const who = (ev) =>
     ev.authorRole === "admin"
       ? "Admin"
