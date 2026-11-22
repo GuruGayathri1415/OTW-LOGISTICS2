@@ -23,6 +23,24 @@ const SUP_TICKET_STATUSES = [
   "Rejected",
   "Closed",
 ];
+const STATUS_TO_BACKEND = {
+  new: "open",
+  open: "open",
+  pending: "waiting_on_user",
+  waiting_on_user: "waiting_on_user",
+  "in progress": "in_progress",
+  in_progress: "in_progress",
+  resolved: "resolved",
+  closed: "closed",
+  rejected: "closed",
+};
+
+function toBackendSupportStatus(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  return STATUS_TO_BACKEND[key] || key;
+}
 
 function normalizeSupportTicket(t = {}) {
   const ticketId = t.ticketId || t.ticket_no || t.ticket_code || t.id || "";
@@ -88,11 +106,21 @@ async function supRequest(path, { method = "GET", body } = {}) {
 
 const badgeFor = (s) => {
   const cls =
-    s === "Resolved" || s === "Closed" || s === "Sent"
+    s === "Resolved" ||
+    s === "Closed" ||
+    s === "Sent" ||
+    s === "resolved" ||
+    s === "closed"
       ? "success"
       : s === "Rejected" || s === "Failed"
         ? "danger"
-        : s === "New" || s === "Pending" || s === "Retrying" || s === "Sending"
+        : s === "New" ||
+            s === "Pending" ||
+            s === "Retrying" ||
+            s === "Sending" ||
+            s === "open" ||
+            s === "in_progress" ||
+            s === "waiting_on_user"
           ? "warning"
           : "";
   return `<span class="badge ${cls}">${esc(s)}</span>`;
@@ -156,7 +184,8 @@ function bindSupport() {
 async function supLoad() {
   try {
     const qs = new URLSearchParams();
-    if (supStore.status) qs.set("status", supStore.status);
+    if (supStore.status)
+      qs.set("status", toBackendSupportStatus(supStore.status));
     if (supStore.portal) qs.set("portal", supStore.portal);
     if (supStore.q.trim()) qs.set("q", supStore.q.trim());
     const out = await supRequest("/tickets?" + qs.toString());
@@ -336,7 +365,7 @@ function supRenderModal(focusReply) {
       <div class="actions"><button class="primary" data-sup-action="reply">Send reply</button></div>
       <h4>Update ticket status</h4>
       <div class="actions">
-        <select id="supStatusSelect">${SUP_TICKET_STATUSES.map((s) => `<option ${s === t.status ? "selected" : ""}>${s}</option>`).join("")}</select>
+        <select id="supStatusSelect">${SUP_TICKET_STATUSES.map((s) => `<option ${toBackendSupportStatus(s) === toBackendSupportStatus(t.status) ? "selected" : ""}>${s}</option>`).join("")}</select>
         <input id="supStatusNote" maxlength="3000" placeholder="Optional note for the record">
         <button class="secondary" data-sup-action="status">Save status</button>
       </div>
@@ -373,12 +402,15 @@ function bindSupportModal() {
             : "Reply saved. The email is queued or failed; see Emails for this ticket.",
         );
       } else if (action === "status") {
+        const backendStatus = toBackendSupportStatus(
+          $("#supStatusSelect").value,
+        );
         supStore.open = await supRequest(
           `/tickets/${encodeURIComponent(id)}/status`,
           {
             method: "POST",
             body: {
-              status: $("#supStatusSelect").value,
+              status: backendStatus,
               note: $("#supStatusNote").value.trim(),
             },
           },
