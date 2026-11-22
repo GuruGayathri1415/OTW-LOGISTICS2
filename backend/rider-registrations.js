@@ -215,6 +215,11 @@ function createStorageAdapter({ uploadDir }) {
   ).trim();
 
   const enabled = !!(supabaseUrl && serviceKey);
+  if (!enabled) {
+    console.warn(
+      "[rider-registrations] Supabase Storage disabled (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY); files will only persist locally if uploadDir is durable.",
+    );
+  }
   let bucketEnsured = false;
 
   function objectUrl(relPath) {
@@ -231,7 +236,7 @@ function createStorageAdapter({ uploadDir }) {
     if (!enabled || bucketEnsured) return;
     bucketEnsured = true;
     try {
-      await fetch(`${supabaseUrl}/storage/v1/bucket`, {
+      const res = await fetch(`${supabaseUrl}/storage/v1/bucket`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${serviceKey}`,
@@ -245,8 +250,17 @@ function createStorageAdapter({ uploadDir }) {
           file_size_limit: REG_MAX_FILE_BYTES,
         }),
       });
-    } catch (_) {
-      // Ignore if bucket already exists
+      if (!res.ok && res.status !== 400 && res.status !== 409) {
+        const detail = await res.text().catch(() => "");
+        console.warn(
+          `[rider-registrations] ensureBucket("${bucket}") responded ${res.status}: ${detail}`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[rider-registrations] ensureBucket("${bucket}") error:`,
+        err?.message || err,
+      );
     }
   }
 
@@ -283,20 +297,31 @@ function createStorageAdapter({ uploadDir }) {
 
   async function readFile(relPath) {
     const cleanRel = String(relPath || "").replace(/^\/+/, "");
-    if (enabled && cleanRel) {
-      const res = await fetch(objectUrl(cleanRel), {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${serviceKey}`,
-          apikey: serviceKey,
-        },
-      });
-      if (res.ok) {
-        const ab = await res.arrayBuffer();
-        return Buffer.from(ab);
+    if (!cleanRel) return null;
+    if (enabled) {
+      try {
+        const res = await fetch(objectUrl(cleanRel), {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${serviceKey}`,
+            apikey: serviceKey,
+          },
+        });
+        if (res.ok) {
+          const ab = await res.arrayBuffer();
+          return Buffer.from(ab);
+        }
+        console.warn(
+          `[rider-registrations] Supabase Storage GET failed for "${cleanRel}" (${res.status})`,
+        );
+      } catch (err) {
+        console.warn(
+          `[rider-registrations] Supabase Storage GET error for "${cleanRel}":`,
+          err?.message || err,
+        );
       }
     }
-    if (uploadDir && cleanRel) {
+    if (uploadDir) {
       const root = path.resolve(uploadDir);
       const abs = path.resolve(root, cleanRel);
       if (abs.startsWith(root + path.sep) && fs.existsSync(abs)) {
@@ -304,6 +329,31 @@ function createStorageAdapter({ uploadDir }) {
       }
     }
     return null;
+  }
+
+  async function removeFile(relPath) {
+    const cleanRel = String(relPath || "").replace(/^\/+/, "");
+    if (!cleanRel) return;
+    if (uploadDir) {
+      const root = path.resolve(uploadDir);
+      const abs = path.resolve(root, cleanRel);
+      if (abs.startsWith(root + path.sep)) {
+        try {
+          fs.rmSync(abs, { force: true });
+        } catch {}
+      }
+    }
+    if (enabled) {
+      try {
+        await fetch(objectUrl(cleanRel), {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${serviceKey}`,
+            apikey: serviceKey,
+          },
+        });
+      } catch {}
+    }
   }
 
   async function removePrefix(folderRel) {
@@ -334,7 +384,7 @@ function createStorageAdapter({ uploadDir }) {
     }
   }
 
-  return { saveFile, readFile, removePrefix };
+  return { saveFile, readFile, removeFile, removePrefix };
 }
 
 export async function createRiderRegistrationService({
@@ -765,15 +815,7 @@ export async function createRiderRegistrationService({
       });
     } catch (err) {
       for (const rel of writtenRels) {
-        if (uploadDir) {
-          const root = path.resolve(uploadDir);
-          const abs = path.resolve(root, rel);
-          if (abs.startsWith(root + path.sep)) {
-            try {
-              fs.rmSync(abs, { force: true });
-            } catch {}
-          }
-        }
+        await storage.removeFile(rel);
       }
       if (isUniqueViolation(err))
         throw new RegistrationError(
