@@ -236,16 +236,18 @@ function supRenderModal(focusReply) {
       : ev.authorRole === "customer"
         ? "Customer"
         : ev.author;
-  const label = (ev) =>
-    ev.kind === "submitted"
-      ? "Submitted"
-      : ev.kind === "reply"
-        ? "Admin reply"
-        : ev.kind === "customer_email"
-          ? "Customer email"
-          : ev.kind === "followup"
-            ? "Partner follow-up"
-            : "Status changed to " + ev.status;
+  const label = (ev) => {
+    if (ev.kind === "submitted" || ev.event_type === "created")
+      return "Submitted";
+    if (ev.kind === "reply" || ev.event_type === "admin_reply")
+      return "Admin reply";
+    if (ev.kind === "customer_email") return "Customer email";
+    if (ev.kind === "followup" || ev.event_type === "partner_followup")
+      return "Partner follow-up";
+    const nextStatus =
+      ev?.meta?.to ?? ev?.toStatus ?? ev?.to ?? ev?.status ?? "";
+    return nextStatus ? "Status changed to " + nextStatus : "Status updated";
+  };
   const history = events.length
     ? events
         .map(
