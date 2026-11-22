@@ -25,7 +25,6 @@ export function registerRiderRegistrationRoutes(
   app,
   { auth, service, onApproved },
 ) {
-  // Checks the portal sign-in and sets req.actor = {role, accountId, identity}.
   const guard = (req, res, next) => {
     const portal = String(req.query.portal || "");
     if (!REG_PORTALS.includes(portal)) {
@@ -49,12 +48,10 @@ export function registerRiderRegistrationRoutes(
 
   const fail = (res, err, context) => {
     if (err instanceof RegistrationError) {
-      return res
-        .status(err.status)
-        .json({
-          error: err.message,
-          ...(err.field ? { field: err.field } : {}),
-        });
+      return res.status(err.status).json({
+        error: err.message,
+        ...(err.field ? { field: err.field } : {}),
+      });
     }
     console.error(context, err && err.message);
     return res
@@ -62,14 +59,11 @@ export function registerRiderRegistrationRoutes(
       .json({ error: "Something went wrong on the server. Please try again." });
   };
 
-  // The rider master contains personal phone numbers. Keep it server-side and expose it only to admins.
   app.get("/api/rider-master-directory", guard, (req, res) => {
     if (req.actor.role !== "admin")
-      return res
-        .status(403)
-        .json({
-          error: "Only the admin can access the rider master directory.",
-        });
+      return res.status(403).json({
+        error: "Only the admin can access the rider master directory.",
+      });
     try {
       const file = new URL(
         "./data/rider-master-directory.json",
@@ -183,25 +177,32 @@ export function registerRiderRegistrationRoutes(
     }
   });
 
-  app.get("/api/rider-registrations/:id/files/:kind", guard, async (req, res) => {
-    try {
-      const file = await service.fileFor(
-        req.actor,
-        req.params.id,
-        req.params.kind,
-      );
-      res.set({
-        "Content-Type": file.type,
-        "Content-Disposition": `inline; filename="${String(file.name).replace(/["\\]/g, "")}"`,
-        "Cache-Control": "private, no-store",
-        "X-Content-Type-Options": "nosniff",
-      });
-      res.sendFile(file.path, (sendErr) => {
-        if (sendErr && !res.headersSent)
-          res.status(404).json({ error: "File not found." });
-      });
-    } catch (err) {
-      fail(res, err, "Could not open the document:");
-    }
-  });
+  app.get(
+    "/api/rider-registrations/:id/files/:kind",
+    guard,
+    async (req, res) => {
+      try {
+        const file = await service.fileFor(
+          req.actor,
+          req.params.id,
+          req.params.kind,
+        );
+        res.set({
+          "Content-Type": file.type,
+          "Content-Disposition": `inline; filename="${String(file.name).replace(/["\\]/g, "")}"`,
+          "Cache-Control": "private, no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        if (file.buffer && file.buffer.length) {
+          return res.send(file.buffer);
+        }
+        res.sendFile(file.path, (sendErr) => {
+          if (sendErr && !res.headersSent)
+            res.status(404).json({ error: "File not found." });
+        });
+      } catch (err) {
+        fail(res, err, "Could not open the document:");
+      }
+    },
+  );
 }

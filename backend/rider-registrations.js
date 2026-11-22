@@ -7,24 +7,24 @@
 //   - a vendor can decide only on the riders it registered;
 //   - a franchise cannot decide on anything (it sees the status and the admin's remarks only).
 //
+// Files are persisted in Supabase Storage when configured (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY),
+// with fallback/mirroring to local uploadDir so files survive Render container restarts.
 // rider-registration-routes.js exposes it over HTTP.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { createClient } from "@supabase/supabase-js";
 
 export const REG_STATUSES = ["PENDING", "APPROVED", "REJECTED"];
 export const REG_MAX_FILE_BYTES = 5 * 1024 * 1024;
-// Rider Applications belong to the Admin Portal (full management), the Vendor Portal (own riders, can decide
-// on them) and the Franchise Portal (own riders, read-only status). Each partner sees only its own registrations.
 export const REG_PORTALS = ["admin", "vendor", "franchise"];
-// Only these roles may approve or reject (a franchise may submit and watch, but never decide).
 export const REG_DECIDER_ROLES = ["admin", "vendor"];
 const SOURCE_BY_ROLE = {
   admin: "Admin",
   vendor: "Vendor",
   franchise: "Franchise",
 };
-const ADMIN_LABEL = "On The Way Logistics"; // what a franchise sees instead of an admin's login / email
+const ADMIN_LABEL = "On The Way Logistics";
 const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const DOCUMENTS = {
   selfie: { label: "rider selfie / screenshot", types: IMAGE_TYPES },
@@ -39,6 +39,7 @@ const EXTENSION = {
   "image/webp": ".webp",
   "application/pdf": ".pdf",
 };
+const DEFAULT_BUCKET = "rider-registrations";
 
 export class RegistrationError extends Error {
   constructor(status, message, field = "") {
@@ -48,7 +49,6 @@ export class RegistrationError extends Error {
   }
 }
 
-// Decide a file's real type from its first bytes, never from its name or the type the browser reports.
 export function sniffType(b) {
   if (b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff)
     return "image/jpeg";
@@ -70,14 +70,12 @@ export function sniffType(b) {
   return "";
 }
 
-// Rider IDs are compared ignoring case and spaces, so "wl 001" and "WL001" are the same rider.
 export function normalizeRiderKey(riderId) {
   return String(riderId ?? "")
     .replace(/\s+/g, "")
     .toUpperCase();
 }
 
-// Mobile numbers are stored as 10 digits. "+91 98765 43210" and "098765 43210" are accepted.
 export function cleanMobile(value) {
   let d = String(value ?? "").replace(/\D/g, "");
   if (d.length === 12 && d.startsWith("91")) d = d.slice(2);
@@ -93,7 +91,6 @@ function safeFileName(original, fallback) {
   return base || fallback;
 }
 
-// Checks the typed fields and returns them in stored form. Throws RegistrationError with the field name.
 export function validateRegistrationFields(raw = {}) {
   const riderId = String(raw.riderId ?? "").trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9\-_\/]{1,39}$/.test(riderId)) {
@@ -165,7 +162,6 @@ export function validateRegistrationFields(raw = {}) {
   };
 }
 
-// Both documents are mandatory. Each must really be the type it claims to be and be 5 MB or smaller.
 export function checkDocuments(files = {}) {
   const out = {};
   for (const [kind, spec] of Object.entries(DOCUMENTS)) {
@@ -203,7 +199,121 @@ export function checkDocuments(files = {}) {
 }
 
 const isUniqueViolation = (err) =>
-  err?.code === "23505" || /UNIQUE constraint failed|duplicate key/i.test(String(err?.message || ""));
+  err?.code === "23505" ||
+  /UNIQUE constraint failed|duplicate key/i.test(String(err?.message || ""));
+
+function createStorageAdapter({ uploadDir }) {
+  const supabaseUrl = String(process.env.SUPABASE_URL || "").trim();
+  const serviceKey = String(
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || "",
+  ).trim();
+  const bucket = String(
+    process.env.SUPABASE_STORAGE_BUCKET ||
+      process.env.RIDER_STORAGE_BUCKET ||
+      DEFAULT_BUCKET,
+  ).trim();
+
+  const client =
+    supabaseUrl && serviceKey
+      ? createClient(supabaseUrl, serviceKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        })
+      : null;
+
+  let bucketChecked = false;
+
+  async function ensureBucket() {
+    if (!client || bucketChecked) return;
+    bucketChecked = true;
+    try {
+      const { data: buckets, error } = await client.storage.listBuckets();
+      if (error) return;
+      const exists = (buckets || []).some((b) => b.name === bucket);
+      if (!exists) {
+        await client.storage.createBucket(bucket, {
+          public: false,
+          fileSizeLimit: REG_MAX_FILE_BYTES,
+        });
+      }
+    } catch (_) {
+      // Bucket may already exist or be managed manually in Supabase Storage
+    }
+  }
+
+  async function saveFile(relPath, doc) {
+    if (uploadDir) {
+      const root = path.resolve(uploadDir);
+      const abs = path.resolve(root, relPath);
+      if (abs.startsWith(root + path.sep)) {
+        fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(abs, doc.buffer, { mode: 0o600 });
+      }
+    }
+    if (client) {
+      await ensureBucket();
+      const { error } = await client.storage
+        .from(bucket)
+        .upload(relPath, doc.buffer, {
+          contentType: doc.type,
+          upsert: true,
+        });
+      if (error) {
+        throw new RegistrationError(
+          500,
+          `Could not store ${doc.name} in Supabase Storage: ${error.message}`,
+        );
+      }
+    }
+  }
+
+  async function readFile(relPath) {
+    const cleanRel = String(relPath || "").replace(/^\/+/, "");
+    if (client && cleanRel) {
+      await ensureBucket();
+      const { data, error } = await client.storage
+        .from(bucket)
+        .download(cleanRel);
+      if (!error && data) {
+        const ab = await data.arrayBuffer();
+        return Buffer.from(ab);
+      }
+    }
+    if (uploadDir && cleanRel) {
+      const root = path.resolve(uploadDir);
+      const abs = path.resolve(root, cleanRel);
+      if (abs.startsWith(root + path.sep) && fs.existsSync(abs)) {
+        return fs.readFileSync(abs);
+      }
+    }
+    return null;
+  }
+
+  async function removePrefix(folderRel) {
+    const cleanFolder = String(folderRel || "").replace(/^\/+|\/+$/g, "");
+    if (uploadDir && cleanFolder) {
+      const root = path.resolve(uploadDir);
+      const dir = path.resolve(root, cleanFolder);
+      if (dir.startsWith(root + path.sep)) {
+        try {
+          fs.rmSync(dir, { recursive: true, force: true });
+        } catch {}
+      }
+    }
+    if (client && cleanFolder) {
+      try {
+        const { data: files } = await client.storage
+          .from(bucket)
+          .list(cleanFolder);
+        if (files && files.length) {
+          const paths = files.map((f) => `${cleanFolder}/${f.name}`);
+          await client.storage.from(bucket).remove(paths);
+        }
+      } catch {}
+    }
+  }
+
+  return { saveFile, readFile, removePrefix };
+}
 
 export async function createRiderRegistrationService({
   db,
@@ -211,6 +321,8 @@ export async function createRiderRegistrationService({
   audit = () => {},
   now = () => new Date().toISOString(),
 }) {
+  const storage = createStorageAdapter({ uploadDir });
+
   await db.exec(`
     CREATE TABLE IF NOT EXISTS rider_registrations(
       id TEXT PRIMARY KEY,
@@ -242,8 +354,6 @@ export async function createRiderRegistrationService({
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
-    -- A rider ID can have only one live application (PENDING or APPROVED). A REJECTED application does not block
-    -- a new one, so a rejected rider can be registered again.
     CREATE UNIQUE INDEX IF NOT EXISTS rider_registrations_live_rider
       ON rider_registrations(rider_key) WHERE application_status <> 'REJECTED';
     CREATE INDEX IF NOT EXISTS rider_registrations_owner ON rider_registrations(owner_account_id, registration_source);
@@ -262,7 +372,6 @@ export async function createRiderRegistrationService({
     INSERT INTO rider_registration_counter(id, last) VALUES(1, 0) ON CONFLICT(id) DO NOTHING;
   `);
 
-  // Databases created before these columns existed get them added (existing records keep their values).
   const columnRows = await db
     .prepare(
       `SELECT column_name AS name
@@ -276,37 +385,20 @@ export async function createRiderRegistrationService({
       "ALTER TABLE rider_registrations ADD COLUMN owner_name TEXT NOT NULL DEFAULT ''",
     );
   if (!existingColumns.has("decision_remarks"))
-    await db.exec("ALTER TABLE rider_registrations ADD COLUMN decision_remarks TEXT");
+    await db.exec(
+      "ALTER TABLE rider_registrations ADD COLUMN decision_remarks TEXT",
+    );
 
   const statements = {
     byId: db.prepare("SELECT * FROM rider_registrations WHERE id = ?"),
     liveByRider: db.prepare(
       "SELECT id, application_id FROM rider_registrations WHERE rider_key = ? AND application_status <> 'REJECTED' AND id <> ?",
     ),
-    insert:
-      db.prepare(`INSERT INTO rider_registrations(id, application_id, rider_id, rider_key, rider_name, mobile_number, hub_pincode, hub_location,
-        selfie_path, selfie_name, selfie_type, selfie_size, aadhaar_path, aadhaar_name, aadhaar_type, aadhaar_size,
-        registration_source, owner_account_id, owner_login_id, owner_name, created_by, application_status, rejection_remarks,
-        decision_remarks, approved_by, approval_date, created_at, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
-    updateStatus:
-      db.prepare(`UPDATE rider_registrations SET application_status = ?, rejection_remarks = ?, decision_remarks = ?,
-        approved_by = ?, approval_date = ?, updated_at = ? WHERE id = ?`),
-    updateDetails:
-      db.prepare(`UPDATE rider_registrations SET rider_id = ?, rider_key = ?, rider_name = ?, mobile_number = ?,
-        hub_pincode = ?, hub_location = ?, selfie_path = ?, selfie_name = ?, selfie_type = ?, selfie_size = ?,
-        aadhaar_path = ?, aadhaar_name = ?, aadhaar_type = ?, aadhaar_size = ?, updated_at = ? WHERE id = ?`),
     insertHistory:
       db.prepare(`INSERT INTO rider_registration_history(registration_id, from_status, to_status, remarks, actor, actor_role, created_at)
         VALUES(?,?,?,?,?,?,?)`),
     historyFor: db.prepare(
       "SELECT * FROM rider_registration_history WHERE registration_id = ? ORDER BY id ASC",
-    ),
-    bumpCounter: db.prepare(
-      "UPDATE rider_registration_counter SET last = last + 1 WHERE id = 1",
-    ),
-    readCounter: db.prepare(
-      "SELECT last FROM rider_registration_counter WHERE id = 1",
     ),
   };
 
@@ -314,7 +406,9 @@ export async function createRiderRegistrationService({
 
   async function nextApplicationId(tx = db) {
     await tx
-      .prepare("UPDATE rider_registration_counter SET last = last + 1 WHERE id = 1")
+      .prepare(
+        "UPDATE rider_registration_counter SET last = last + 1 WHERE id = 1",
+      )
       .run();
     const row = await tx
       .prepare("SELECT last FROM rider_registration_counter WHERE id = 1")
@@ -330,7 +424,6 @@ export async function createRiderRegistrationService({
       );
   }
 
-  // Admins see every registration. Vendors see only the riders they registered themselves.
   function scopeFor(actor) {
     if (actor.role === "admin") return { sql: "1 = 1", params: [] };
     return {
@@ -393,7 +486,6 @@ export async function createRiderRegistrationService({
     return out;
   }
 
-  // A franchise sees who decided as "On The Way Logistics" rather than an admin's login e-mail.
   function forViewer(actor, item) {
     if (actor.role !== "franchise") return item;
     const out = { ...item, approvedBy: item.approvedBy ? ADMIN_LABEL : "" };
@@ -424,7 +516,6 @@ export async function createRiderRegistrationService({
     return forViewer(actor, toPublic(row, history));
   }
 
-  // files: {selfie: {buffer, originalname}, aadhaar: {buffer, originalname}} as read by multer.
   async function create(actor, rawFields, files) {
     assertActor(actor);
     const fields = validateRegistrationFields(rawFields);
@@ -434,20 +525,15 @@ export async function createRiderRegistrationService({
     if (liveNow) throw duplicateError(fields, liveNow);
 
     const id = crypto.randomUUID();
-    const dir = path.join(uploadDir, "registrations", id);
+    const folderRel = path.posix.join("registrations", id);
     try {
-      // Files are written before the record so the record never points at a missing file.
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       const stored = {};
       for (const kind of Object.keys(docs)) {
         const rel = path.posix.join(
-          "registrations",
-          id,
+          folderRel,
           kind + EXTENSION[docs[kind].type],
         );
-        fs.writeFileSync(path.join(uploadDir, rel), docs[kind].buffer, {
-          mode: 0o600,
-        });
+        await storage.saveFile(rel, docs[kind]);
         stored[kind] = rel;
       }
       const stamp = now();
@@ -464,11 +550,13 @@ export async function createRiderRegistrationService({
         if (clash) throw duplicateError(fields, clash);
         const applicationId = await nextApplicationId(tx);
         await tx
-          .prepare(`INSERT INTO rider_registrations(id, application_id, rider_id, rider_key, rider_name, mobile_number, hub_pincode, hub_location,
+          .prepare(
+            `INSERT INTO rider_registrations(id, application_id, rider_id, rider_key, rider_name, mobile_number, hub_pincode, hub_location,
             selfie_path, selfie_name, selfie_type, selfie_size, aadhaar_path, aadhaar_name, aadhaar_type, aadhaar_size,
             registration_source, owner_account_id, owner_login_id, owner_name, created_by, application_status, rejection_remarks,
             decision_remarks, approved_by, approval_date, created_at, updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          )
           .run(
             id,
             applicationId,
@@ -500,8 +588,10 @@ export async function createRiderRegistrationService({
             stamp,
           );
         await tx
-          .prepare(`INSERT INTO rider_registration_history(registration_id, from_status, to_status, remarks, actor, actor_role, created_at)
-            VALUES(?,?,?,?,?,?,?)`)
+          .prepare(
+            `INSERT INTO rider_registration_history(registration_id, from_status, to_status, remarks, actor, actor_role, created_at)
+            VALUES(?,?,?,?,?,?,?)`,
+          )
           .run(
             id,
             null,
@@ -521,7 +611,7 @@ export async function createRiderRegistrationService({
       const history = await statements.historyFor.all(id);
       return toPublic(row, history);
     } catch (err) {
-      fs.rmSync(dir, { recursive: true, force: true }); // nothing was saved, so remove the files of this attempt
+      await storage.removePrefix(folderRel);
       if (err instanceof RegistrationError) throw err;
       if (isUniqueViolation(err) && String(err.message).includes("rider_key")) {
         throw new RegistrationError(
@@ -542,8 +632,6 @@ export async function createRiderRegistrationService({
     );
   }
 
-  // Approve or reject. Any change of status is kept in the history with who made it, when and the remarks.
-  // Admin-only edits. Omitted document uploads keep the existing private files.
   async function update(actor, id, rawFields = {}, files = {}) {
     assertActor(actor);
     if (actor.role !== "admin")
@@ -589,9 +677,6 @@ export async function createRiderRegistrationService({
       };
     }
 
-    const root = path.resolve(uploadDir),
-      dir = path.join(root, "registrations", row.id);
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const next = {
       selfie_path: row.selfie_path,
       selfie_name: row.selfie_name,
@@ -602,15 +687,15 @@ export async function createRiderRegistrationService({
       aadhaar_type: row.aadhaar_type,
       aadhaar_size: row.aadhaar_size,
     };
-    const written = [];
+    const writtenRels = [];
     for (const [kind, doc] of Object.entries(replacements)) {
       const rel = path.posix.join(
         "registrations",
         row.id,
         kind + "-" + crypto.randomUUID() + EXTENSION[doc.type],
       );
-      fs.writeFileSync(path.join(root, rel), doc.buffer, { mode: 0o600 });
-      written.push(path.join(root, rel));
+      await storage.saveFile(rel, doc);
+      writtenRels.push(rel);
       next[kind + "_path"] = rel;
       next[kind + "_name"] = doc.name;
       next[kind + "_type"] = doc.type;
@@ -632,9 +717,11 @@ export async function createRiderRegistrationService({
             "riderId",
           );
         await tx
-          .prepare(`UPDATE rider_registrations SET rider_id = ?, rider_key = ?, rider_name = ?, mobile_number = ?,
+          .prepare(
+            `UPDATE rider_registrations SET rider_id = ?, rider_key = ?, rider_name = ?, mobile_number = ?,
             hub_pincode = ?, hub_location = ?, selfie_path = ?, selfie_name = ?, selfie_type = ?, selfie_size = ?,
-            aadhaar_path = ?, aadhaar_name = ?, aadhaar_type = ?, aadhaar_size = ?, updated_at = ? WHERE id = ?`)
+            aadhaar_path = ?, aadhaar_name = ?, aadhaar_type = ?, aadhaar_size = ?, updated_at = ? WHERE id = ?`,
+          )
           .run(
             fields.riderId,
             fields.riderKey,
@@ -655,10 +742,17 @@ export async function createRiderRegistrationService({
           );
       });
     } catch (err) {
-      for (const f of written)
-        try {
-          fs.rmSync(f, { force: true });
-        } catch {}
+      for (const rel of writtenRels) {
+        if (uploadDir) {
+          const root = path.resolve(uploadDir);
+          const abs = path.resolve(root, rel);
+          if (abs.startsWith(root + path.sep)) {
+            try {
+              fs.rmSync(abs, { force: true });
+            } catch {}
+          }
+        }
+      }
       if (isUniqueViolation(err))
         throw new RegistrationError(
           409,
@@ -726,8 +820,10 @@ export async function createRiderRegistrationService({
         }
       }
       await tx
-        .prepare(`UPDATE rider_registrations SET application_status = ?, rejection_remarks = ?, decision_remarks = ?,
-          approved_by = ?, approval_date = ?, updated_at = ? WHERE id = ?`)
+        .prepare(
+          `UPDATE rider_registrations SET application_status = ?, rejection_remarks = ?, decision_remarks = ?,
+          approved_by = ?, approval_date = ?, updated_at = ? WHERE id = ?`,
+        )
         .run(
           target,
           target === "REJECTED" ? remarks : null,
@@ -738,8 +834,10 @@ export async function createRiderRegistrationService({
           row.id,
         );
       await tx
-        .prepare(`INSERT INTO rider_registration_history(registration_id, from_status, to_status, remarks, actor, actor_role, created_at)
-          VALUES(?,?,?,?,?,?,?)`)
+        .prepare(
+          `INSERT INTO rider_registration_history(registration_id, from_status, to_status, remarks, actor, actor_role, created_at)
+          VALUES(?,?,?,?,?,?,?)`,
+        )
         .run(
           row.id,
           row.application_status,
@@ -759,29 +857,32 @@ export async function createRiderRegistrationService({
     return get(actor, row.id);
   }
 
-  // Path of a stored document, if this account may see that registration. Aadhaar views are audited.
   async function fileFor(actor, id, kind) {
     assertActor(actor);
     if (!DOCUMENTS[kind]) throw new RegistrationError(404, "File not found.");
     const row = await visibleRow(actor, id);
     if (!row) throw new RegistrationError(404, "File not found.");
     const rel = kind === "selfie" ? row.selfie_path : row.aadhaar_path;
-    const root = path.resolve(uploadDir);
-    const abs = path.resolve(root, rel);
-    if (!abs.startsWith(root + path.sep) || !fs.existsSync(abs)) {
+    const buffer = await storage.readFile(rel);
+    if (!buffer || !buffer.length) {
       throw new RegistrationError(
         404,
         "The file is missing on the server. Ask the administrator to check the uploads folder.",
       );
     }
     if (kind === "aadhaar") {
-      await audit(String(actor.identity || actor.role), "rider_aadhaar_viewed", {
-        applicationId: row.application_id,
-        riderId: row.rider_id,
-      });
+      await audit(
+        String(actor.identity || actor.role),
+        "rider_aadhaar_viewed",
+        {
+          applicationId: row.application_id,
+          riderId: row.rider_id,
+        },
+      );
     }
     return {
-      path: abs,
+      buffer,
+      path: uploadDir ? path.resolve(path.resolve(uploadDir), rel) : "",
       type: kind === "selfie" ? row.selfie_type : row.aadhaar_type,
       name: kind === "selfie" ? row.selfie_name : row.aadhaar_name,
     };
