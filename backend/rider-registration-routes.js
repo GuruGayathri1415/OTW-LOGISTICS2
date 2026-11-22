@@ -159,19 +159,19 @@ export function registerRiderRegistrationRoutes(
         req.params.id,
         req.body || {},
       );
-      if (item?.status === "APPROVED" && typeof onApproved === "function") {
-        try {
-          await onApproved(
-            String(req.actor?.identity || req.actor?.role || ""),
-          );
-        } catch (err) {
-          console.error(
-            "Could not re-check pending payment rows after approval:",
-            err.message,
-          );
-        }
-      }
       res.json({ ok: true, item });
+      if (item?.status === "APPROVED" && typeof onApproved === "function") {
+        Promise.resolve()
+          .then(() =>
+            onApproved(String(req.actor?.identity || req.actor?.role || "")),
+          )
+          .catch((err) => {
+            console.error(
+              "Could not re-check pending payment rows after approval:",
+              err?.message || err,
+            );
+          });
+      }
     } catch (err) {
       fail(res, err, "Could not change the application status:");
     }
