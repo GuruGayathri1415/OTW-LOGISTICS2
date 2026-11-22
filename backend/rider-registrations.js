@@ -13,7 +13,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { createClient } from "@supabase/supabase-js";
 
 export const REG_STATUSES = ["PENDING", "APPROVED", "REJECTED"];
 export const REG_MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -203,7 +202,9 @@ const isUniqueViolation = (err) =>
   /UNIQUE constraint failed|duplicate key/i.test(String(err?.message || ""));
 
 function createStorageAdapter({ uploadDir }) {
-  const supabaseUrl = String(process.env.SUPABASE_URL || "").trim();
+  const supabaseUrl = String(process.env.SUPABASE_URL || "")
+    .trim()
+    .replace(/\/+$/, "");
   const serviceKey = String(
     process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || "",
   ).trim();
@@ -213,30 +214,39 @@ function createStorageAdapter({ uploadDir }) {
       DEFAULT_BUCKET,
   ).trim();
 
-  const client =
-    supabaseUrl && serviceKey
-      ? createClient(supabaseUrl, serviceKey, {
-          auth: { persistSession: false, autoRefreshToken: false },
-        })
-      : null;
+  const enabled = !!(supabaseUrl && serviceKey);
+  let bucketEnsured = false;
 
-  let bucketChecked = false;
+  function objectUrl(relPath) {
+    const encoded = String(relPath || "")
+      .replace(/^\/+/, "")
+      .split("/")
+      .filter(Boolean)
+      .map(encodeURIComponent)
+      .join("/");
+    return `${supabaseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${encoded}`;
+  }
 
   async function ensureBucket() {
-    if (!client || bucketChecked) return;
-    bucketChecked = true;
+    if (!enabled || bucketEnsured) return;
+    bucketEnsured = true;
     try {
-      const { data: buckets, error } = await client.storage.listBuckets();
-      if (error) return;
-      const exists = (buckets || []).some((b) => b.name === bucket);
-      if (!exists) {
-        await client.storage.createBucket(bucket, {
+      await fetch(`${supabaseUrl}/storage/v1/bucket`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${serviceKey}`,
+          apikey: serviceKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          id: bucket,
+          name: bucket,
           public: false,
-          fileSizeLimit: REG_MAX_FILE_BYTES,
-        });
-      }
+          file_size_limit: REG_MAX_FILE_BYTES,
+        }),
+      });
     } catch (_) {
-      // Bucket may already exist or be managed manually in Supabase Storage
+      // Ignore if bucket already exists
     }
   }
 
@@ -249,18 +259,23 @@ function createStorageAdapter({ uploadDir }) {
         fs.writeFileSync(abs, doc.buffer, { mode: 0o600 });
       }
     }
-    if (client) {
+    if (enabled) {
       await ensureBucket();
-      const { error } = await client.storage
-        .from(bucket)
-        .upload(relPath, doc.buffer, {
-          contentType: doc.type,
-          upsert: true,
-        });
-      if (error) {
+      const res = await fetch(objectUrl(relPath), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${serviceKey}`,
+          apikey: serviceKey,
+          "Content-Type": doc.type || "application/octet-stream",
+          "x-upsert": "true",
+        },
+        body: doc.buffer,
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
         throw new RegistrationError(
           500,
-          `Could not store ${doc.name} in Supabase Storage: ${error.message}`,
+          `Could not store ${doc.name} in Supabase Storage (${res.status}): ${detail}`,
         );
       }
     }
@@ -268,13 +283,16 @@ function createStorageAdapter({ uploadDir }) {
 
   async function readFile(relPath) {
     const cleanRel = String(relPath || "").replace(/^\/+/, "");
-    if (client && cleanRel) {
-      await ensureBucket();
-      const { data, error } = await client.storage
-        .from(bucket)
-        .download(cleanRel);
-      if (!error && data) {
-        const ab = await data.arrayBuffer();
+    if (enabled && cleanRel) {
+      const res = await fetch(objectUrl(cleanRel), {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${serviceKey}`,
+          apikey: serviceKey,
+        },
+      });
+      if (res.ok) {
+        const ab = await res.arrayBuffer();
         return Buffer.from(ab);
       }
     }
@@ -299,16 +317,20 @@ function createStorageAdapter({ uploadDir }) {
         } catch {}
       }
     }
-    if (client && cleanFolder) {
-      try {
-        const { data: files } = await client.storage
-          .from(bucket)
-          .list(cleanFolder);
-        if (files && files.length) {
-          const paths = files.map((f) => `${cleanFolder}/${f.name}`);
-          await client.storage.from(bucket).remove(paths);
+    if (enabled && cleanFolder) {
+      for (const kind of Object.keys(DOCUMENTS)) {
+        for (const ext of Object.values(EXTENSION)) {
+          try {
+            await fetch(objectUrl(`${cleanFolder}/${kind}${ext}`), {
+              method: "DELETE",
+              headers: {
+                Authorization: `Bearer ${serviceKey}`,
+                apikey: serviceKey,
+              },
+            });
+          } catch {}
         }
-      } catch {}
+      }
     }
   }
 
