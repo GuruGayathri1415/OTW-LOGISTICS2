@@ -201,10 +201,10 @@ function hub() {
     layout(
       "Hub Management",
       "Add a hub with the form below. Use Edit to change a hub.",
-      '<label class="ghost file-picker hub-import-btn" title="Import hubs from an .xlsx, .xls or .csv file"><input type="file" id="hubImportFile" accept=".xlsx,.xls,.csv" hidden>📥 Import Excel</label><button class="primary" id="addHub">+ Add New Hub</button>',
+      '<label class="ghost file-picker hub-import-btn" title="Import hubs from an .xlsx, .xls or .csv file"><input type="file" id="hubImportFile" accept=".xlsx,.xls,.csv" hidden>📥 Import Excel</label><button type="button" class="primary" id="addHub">+ Add New Hub</button>',
     ) +
     '<div id="adminLocationsCard"></div>' +
-    `<div class="card hub-form-card">
+    `<div class="card hub-form-card" id="addHubSection" style="scroll-margin-top:16px">
         <div class="hub-form-head"><h3 id="hubFormTitle">Add New Hub</h3><span class="muted" id="hubFormHint">Fields marked * are required.</span></div>
         <form id="hubPageForm" class="form-grid" autocomplete="off">
           ${HUB_FORM.map(hubFieldHtml).join("")}
@@ -220,6 +220,21 @@ function hubMapQuery(h) {
   return [h.address, h.location, h.city, h.district, h.state, h.pincode, h.name]
     .filter(Boolean)
     .join(", ");
+}
+
+function scrollToAddHubSection(focusSelector = "#hf-name") {
+  const section =
+    document.getElementById("addHubSection") ||
+    document.querySelector(".hub-form-card");
+  if (section) {
+    section.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  const targetInput =
+    document.querySelector(focusSelector) ||
+    section?.querySelector("input, select, textarea");
+  if (targetInput) {
+    setTimeout(() => targetInput.focus({ preventScroll: true }), 250);
+  }
 }
 
 function bindHubs() {
@@ -244,10 +259,10 @@ function bindHubs() {
       importInput.value = ""; // choosing the same file again still triggers an import
       if (file) importHubFile(file);
     };
-  $("#addHub").onclick = () => {
+  $("#addHub").onclick = (e) => {
+    e.preventDefault();
     resetHubForm();
-    $("#hf-name").focus();
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    scrollToAddHubSection("#hf-name");
   };
   $("#addNote").onclick = () => noteModal();
   $("#hubSearch").oninput = applyHubSearch;
@@ -344,8 +359,7 @@ function enterHubEdit(h) {
   fillHubForm(hubEditSnapshot);
   clearHubMessages();
   setHubFormMode(h);
-  $("#hf-name").focus();
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  scrollToAddHubSection("#hf-name");
 }
 
 // Shows server messages under the fields they belong to; a message without a field shows as a notice.
