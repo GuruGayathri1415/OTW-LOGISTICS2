@@ -25,7 +25,11 @@ import { registerRiderRegistrationRoutes } from "./rider-registration-routes.js"
 import { createSupportService } from "./support-tickets.js";
 import { registerSupportRoutes } from "./support-routes.js";
 import { createSupportMailer } from "./support-mail.js";
-import { createGmailApi, createGmailInbound, gmailConfigFrom } from "./support-inbound.js";
+import {
+  createGmailApi,
+  createGmailInbound,
+  gmailConfigFrom,
+} from "./support-inbound.js";
 import { createHubService } from "./hubs.js";
 import { registerHubRoutes } from "./hub-routes.js";
 import {
@@ -34,9 +38,7 @@ import {
 } from "./weekly-payments.js";
 import { partnerPortalPayload } from "./partner-reports.js";
 import { registerWeeklyPaymentRoutes } from "./weekly-payment-routes.js";
-import {
-  createAdminDocumentService,
-} from "./admin-documents.js";
+import { createAdminDocumentService } from "./admin-documents.js";
 import { registerAdminDocumentRoutes } from "./admin-document-routes.js";
 import { createLocationService, registerLocationRoutes } from "./locations.js";
 import { createDriveSyncService } from "./drive-sync.js";
@@ -180,7 +182,13 @@ if (Number(adminCountRow?.n || 0) === 0) {
 
 await auth.ensureSuperAdmin(process.env.SUPER_ADMIN_EMAIL);
 await auth.cleanupSessions();
-setInterval(() => auth.cleanupSessions().catch((e) => console.error("Session cleanup:", e.message)), 60 * 60 * 1000).unref();
+setInterval(
+  () =>
+    auth
+      .cleanupSessions()
+      .catch((e) => console.error("Session cleanup:", e.message)),
+  60 * 60 * 1000,
+).unref();
 
 if (process.env.TRUST_PROXY)
   app.set(
@@ -290,14 +298,21 @@ app.use("/api", (req, res, next) => {
   next();
 });
 
+const GLOBAL_API_EXEMPT = new Set([
+  "/api/support/mine",
+  "/api/portal/notifications",
+]);
 app.use(
   "/api",
   rateLimit({
     windowMs: 60_000,
-    max: 300,
+    max: 600,
     standardHeaders: true,
     legacyHeaders: false,
-    message: { error: "Too many requests. Please wait a minute and try again." },
+    skip: (req) => GLOBAL_API_EXEMPT.has(req.path),
+    message: {
+      error: "Too many requests. Please wait a minute and try again.",
+    },
   }),
 );
 
@@ -350,7 +365,12 @@ async function audit(email, action, details) {
     .prepare(
       "INSERT INTO audit_log(admin_email,action,details,created_at) VALUES(?,?,?,?)",
     )
-    .run(email, action, JSON.stringify(details || {}), new Date().toISOString());
+    .run(
+      email,
+      action,
+      JSON.stringify(details || {}),
+      new Date().toISOString(),
+    );
 }
 
 app.post(
@@ -506,7 +526,9 @@ app.post("/api/auth/login", loginIpLimiter, loginLimiter, async (req, res) => {
         .status(403)
         .json({ error: banMessage(ban, account.role), code: "BANNED" });
     }
-    await auth.startSession(req, res, account, { remember: !!req.body?.remember });
+    await auth.startSession(req, res, account, {
+      remember: !!req.body?.remember,
+    });
     await audit(
       account.role === "admin" ? account.email : account.login_id,
       "signed_in",
@@ -649,7 +671,10 @@ async function mailStatus({ fresh = false } = {}) {
       mail.transporter.verify(),
       new Promise((_, reject) =>
         setTimeout(
-          () => reject(Object.assign(new Error("timed out"), { code: "ETIMEDOUT" })),
+          () =>
+            reject(
+              Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+            ),
           12_000,
         ).unref?.(),
       ),
@@ -662,7 +687,10 @@ async function mailStatus({ fresh = false } = {}) {
     };
   } catch (err) {
     const refused =
-      err && (err.code === "EAUTH" || err.responseCode === 535 || err.responseCode === 534);
+      err &&
+      (err.code === "EAUTH" ||
+        err.responseCode === 535 ||
+        err.responseCode === 534);
     mailCheck = {
       at: Date.now(),
       ready: false,
@@ -742,44 +770,56 @@ const adminsWithHelp = async () => {
   }));
 };
 
-app.get("/api/admin/accounts", adminGuard, superAdminGuard, async (req, res) => {
-  const mail = await mailStatus({ fresh: req.query.check === "1" });
-  res.json({
-    ok: true,
-    admins: await adminsWithHelp(),
-    mailReady: mail.ready,
-    mailProblem: mail.ready ? "" : mail.detail,
-  });
-});
-
-app.post("/api/admin/accounts", adminGuard, superAdminGuard, async (req, res) => {
-  try {
-    const out = await auth.addAdmin({
-      name: req.body?.name,
-      email: req.body?.email,
-    });
-    if (!out.ok)
-      return res
-        .status(out.status || 400)
-        .json({ error: out.error, field: out.field });
-    await audit(req.adminEmail, "admin_account_added", {
-      target: out.account.email,
-      name: out.account.name,
-    });
-    res.set("Cache-Control", "no-store");
-    res.status(201).json({
+app.get(
+  "/api/admin/accounts",
+  adminGuard,
+  superAdminGuard,
+  async (req, res) => {
+    const mail = await mailStatus({ fresh: req.query.check === "1" });
+    res.json({
       ok: true,
-      password: out.password,
-      loginId: out.account.login_id,
-      email: out.account.email,
-      name: out.account.name,
       admins: await adminsWithHelp(),
+      mailReady: mail.ready,
+      mailProblem: mail.ready ? "" : mail.detail,
     });
-  } catch (err) {
-    console.error("Add admin failed:", err.message);
-    res.status(500).json({ error: "Could not add the admin. Please try again." });
-  }
-});
+  },
+);
+
+app.post(
+  "/api/admin/accounts",
+  adminGuard,
+  superAdminGuard,
+  async (req, res) => {
+    try {
+      const out = await auth.addAdmin({
+        name: req.body?.name,
+        email: req.body?.email,
+      });
+      if (!out.ok)
+        return res
+          .status(out.status || 400)
+          .json({ error: out.error, field: out.field });
+      await audit(req.adminEmail, "admin_account_added", {
+        target: out.account.email,
+        name: out.account.name,
+      });
+      res.set("Cache-Control", "no-store");
+      res.status(201).json({
+        ok: true,
+        password: out.password,
+        loginId: out.account.login_id,
+        email: out.account.email,
+        name: out.account.name,
+        admins: await adminsWithHelp(),
+      });
+    } catch (err) {
+      console.error("Add admin failed:", err.message);
+      res
+        .status(500)
+        .json({ error: "Could not add the admin. Please try again." });
+    }
+  },
+);
 
 app.patch(
   "/api/admin/accounts/:loginId",
@@ -799,7 +839,9 @@ app.patch(
         await audit(req.adminEmail, "admin_account_updated", {
           target: out.account.email,
           changes: out.changes,
-          ...(out.changes.includes("email") ? { previousEmail: out.previousEmail } : {}),
+          ...(out.changes.includes("email")
+            ? { previousEmail: out.previousEmail }
+            : {}),
         });
       res.json({
         ok: true,
@@ -809,7 +851,9 @@ app.patch(
       });
     } catch (err) {
       console.error("Edit admin failed:", err.message);
-      res.status(500).json({ error: "Could not save the changes. Please try again." });
+      res
+        .status(500)
+        .json({ error: "Could not save the changes. Please try again." });
     }
   },
 );
@@ -840,7 +884,9 @@ app.post(
       console.error("Temporary password failed:", err.message);
       res
         .status(500)
-        .json({ error: "Could not set a temporary password. Please try again." });
+        .json({
+          error: "Could not set a temporary password. Please try again.",
+        });
     }
   },
 );
@@ -888,7 +934,11 @@ app.post(
   superAdminGuard,
   async (req, res) => {
     const status = String(req.body?.status || "");
-    const out = await auth.setAdminStatus(req.params.loginId, status, req.account.id);
+    const out = await auth.setAdminStatus(
+      req.params.loginId,
+      status,
+      req.account.id,
+    );
     if (!out.ok)
       return res.status(out.status || 400).json({ error: out.error });
     await audit(
@@ -928,7 +978,9 @@ function normalizeStatus(v) {
 }
 
 const legacyApprovedRows = await db
-  .prepare("SELECT id,payload FROM partner_applications WHERE status='Approved'")
+  .prepare(
+    "SELECT id,payload FROM partner_applications WHERE status='Approved'",
+  )
   .all();
 for (const r of legacyApprovedRows) {
   const p = JSON.parse(r.payload);
@@ -980,7 +1032,9 @@ await db.exec(
 async function nextApplicationId(type) {
   return db.transaction(async (tx) => {
     const prefix = partnerPrefix(type);
-    const taken = tx.prepare("SELECT 1 FROM partner_applications WHERE app_id=?");
+    const taken = tx.prepare(
+      "SELECT 1 FROM partner_applications WHERE app_id=?",
+    );
     const counterRow = await tx
       .prepare("SELECT last FROM id_counters WHERE prefix=?")
       .get(prefix);
@@ -1011,7 +1065,11 @@ const EMAIL_OK = /^[^\s@<>()",;:]+@[^\s@<>()",;:]+\.[^\s@<>()",;:]+$/;
 async function emailApplicant(app, message) {
   const to = String(app.email || "").trim();
   if (!EMAIL_OK.test(to))
-    return { sent: false, to: "", reason: "The application has no valid email address." };
+    return {
+      sent: false,
+      to: "",
+      reason: "The application has no valid email address.",
+    };
   const status = await mailStatus();
   if (!status.ready)
     return {
@@ -1046,15 +1104,25 @@ async function emailApplicant(app, message) {
   } catch (e) {
     console.error("Applicant email failed:", e.message);
     mailCheck.at = 0;
-    return { sent: false, to, reason: "The email could not be sent. Share the details another way." };
+    return {
+      sent: false,
+      to,
+      reason: "The email could not be sent. Share the details another way.",
+    };
   }
 }
 
-const RETRY_DELAYS_MS = process.env.NODE_ENV === "test" ? [10, 10] : [10_000, 60_000];
+const RETRY_DELAYS_MS =
+  process.env.NODE_ENV === "test" ? [10, 10] : [10_000, 60_000];
 async function sendWithRetry(send) {
   let result = await send();
   for (const wait of RETRY_DELAYS_MS) {
-    if (result.sent || !result.to || /not set up|no valid email/i.test(result.reason || "")) break;
+    if (
+      result.sent ||
+      !result.to ||
+      /not set up|no valid email/i.test(result.reason || "")
+    )
+      break;
     await new Promise((r) => setTimeout(r, wait));
     result = await send();
   }
@@ -1102,7 +1170,11 @@ const loginFor = (req, app, loginId, password = "") => {
   }
   return { portalUrl, loginId, password };
 };
-const NOT_NOTIFIED = { sent: false, to: "", reason: "you chose not to email the applicant." };
+const NOT_NOTIFIED = {
+  sent: false,
+  to: "",
+  reason: "you chose not to email the applicant.",
+};
 
 function credentialsFor(req, app, login, email) {
   return {
@@ -1119,7 +1191,12 @@ function credentialsFor(req, app, login, email) {
   };
 }
 
-async function decisionFollowUp(req, app, decision, { note = "", notify = true } = {}) {
+async function decisionFollowUp(
+  req,
+  app,
+  decision,
+  { note = "", notify = true } = {},
+) {
   let email = null,
     credentials = null,
     loginReenabled = false;
@@ -1127,18 +1204,29 @@ async function decisionFollowUp(req, app, decision, { note = "", notify = true }
     const r = await auth.ensurePartnerAccount(app);
     const login = loginFor(req, app, r.account.login_id, r.password || "");
     email = notify
-      ? await emailApplicant(app, approvedEmail(app, { login, note, supportEmail: SUPPORT_EMAIL }))
+      ? await emailApplicant(
+          app,
+          approvedEmail(app, { login, note, supportEmail: SUPPORT_EMAIL }),
+        )
       : NOT_NOTIFIED;
     if (r.password) credentials = credentialsFor(req, app, login, email);
     else loginReenabled = true;
   } else if (decision === "Rejected") {
     await auth.disablePartnerAccount(app.id);
     email = notify
-      ? await emailApplicant(app, rejectedEmail(app, { note, supportEmail: SUPPORT_EMAIL }))
+      ? await emailApplicant(
+          app,
+          rejectedEmail(app, { note, supportEmail: SUPPORT_EMAIL }),
+        )
       : NOT_NOTIFIED;
   }
   const saved = email
-    ? (await recordApplicantEmail(app.id, decision === "Accepted" ? "approved" : "rejected", email, req.adminEmail)) || app
+    ? (await recordApplicantEmail(
+        app.id,
+        decision === "Accepted" ? "approved" : "rejected",
+        email,
+        req.adminEmail,
+      )) || app
     : app;
   return { email, credentials, loginReenabled, application: saved };
 }
@@ -1169,9 +1257,22 @@ const partnerApplicationUpload = multer({
 ]);
 function sniffPartnerFile(buffer) {
   if (!buffer || !buffer.length) return "";
-  if (buffer.length > 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "image/jpeg";
-  if (buffer.length > 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]))) return "image/png";
-  if (buffer.length > 5 && buffer.subarray(0, 5).toString("latin1") === "%PDF-") return "application/pdf";
+  if (
+    buffer.length > 3 &&
+    buffer[0] === 0xff &&
+    buffer[1] === 0xd8 &&
+    buffer[2] === 0xff
+  )
+    return "image/jpeg";
+  if (
+    buffer.length > 8 &&
+    buffer
+      .subarray(0, 8)
+      .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  )
+    return "image/png";
+  if (buffer.length > 5 && buffer.subarray(0, 5).toString("latin1") === "%PDF-")
+    return "application/pdf";
   return "";
 }
 
@@ -1179,23 +1280,49 @@ const partnerDocumentKeyPath = path.join(UPLOAD_DIR, ".partner-document-key");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true, mode: 0o700 });
 let partnerDocumentKey;
 if (process.env.PARTNER_DOCUMENT_ENCRYPTION_KEY) {
-  partnerDocumentKey = Buffer.from(process.env.PARTNER_DOCUMENT_ENCRYPTION_KEY, "base64");
-  if (partnerDocumentKey.length !== 32) throw new Error("PARTNER_DOCUMENT_ENCRYPTION_KEY must be a base64-encoded 32-byte key.");
+  partnerDocumentKey = Buffer.from(
+    process.env.PARTNER_DOCUMENT_ENCRYPTION_KEY,
+    "base64",
+  );
+  if (partnerDocumentKey.length !== 32)
+    throw new Error(
+      "PARTNER_DOCUMENT_ENCRYPTION_KEY must be a base64-encoded 32-byte key.",
+    );
 } else {
-  try { partnerDocumentKey = fs.readFileSync(partnerDocumentKeyPath); }
-  catch { partnerDocumentKey = crypto.randomBytes(32); fs.writeFileSync(partnerDocumentKeyPath, partnerDocumentKey, { flag: "wx", mode: 0o600 }); }
-  if (partnerDocumentKey.length !== 32) throw new Error("Invalid partner document encryption key file.");
+  try {
+    partnerDocumentKey = fs.readFileSync(partnerDocumentKeyPath);
+  } catch {
+    partnerDocumentKey = crypto.randomBytes(32);
+    fs.writeFileSync(partnerDocumentKeyPath, partnerDocumentKey, {
+      flag: "wx",
+      mode: 0o600,
+    });
+  }
+  if (partnerDocumentKey.length !== 32)
+    throw new Error("Invalid partner document encryption key file.");
 }
 function encryptPartnerDocument(plain) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", partnerDocumentKey, iv);
   const encrypted = Buffer.concat([cipher.update(plain), cipher.final()]);
-  return Buffer.concat([Buffer.from("OTW1"), iv, cipher.getAuthTag(), encrypted]);
+  return Buffer.concat([
+    Buffer.from("OTW1"),
+    iv,
+    cipher.getAuthTag(),
+    encrypted,
+  ]);
 }
 function decryptPartnerDocument(stored) {
-  if (stored.length < 32 || stored.subarray(0, 4).toString("ascii") !== "OTW1") throw new Error("Encrypted document format is invalid.");
-  const iv = stored.subarray(4, 16), tag = stored.subarray(16, 32), body = stored.subarray(32);
-  const decipher = crypto.createDecipheriv("aes-256-gcm", partnerDocumentKey, iv);
+  if (stored.length < 32 || stored.subarray(0, 4).toString("ascii") !== "OTW1")
+    throw new Error("Encrypted document format is invalid.");
+  const iv = stored.subarray(4, 16),
+    tag = stored.subarray(16, 32),
+    body = stored.subarray(32);
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm",
+    partnerDocumentKey,
+    iv,
+  );
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(body), decipher.final()]);
 }
@@ -1219,16 +1346,25 @@ app.post(
     try {
       const input = cleanInput(req.body);
       const type = typeOf(input.type || input.portalType);
-      const createdBy = req.is("application/json") ? await adminEmailOf(req) : "";
+      const createdBy = req.is("application/json")
+        ? await adminEmailOf(req)
+        : "";
       const submissionKey = String(req.body?.submissionKey || "").trim();
       if (submissionKey && !/^[A-Za-z0-9-]{16,80}$/.test(submissionKey))
         return res.status(400).json({ error: "Invalid submission key." });
       if (submissionKey) {
         const existing = await findApplicationByKey(submissionKey);
-        if (existing) return res.status(200).json({ ok: true, duplicate: true, application: existing });
+        if (existing)
+          return res
+            .status(200)
+            .json({ ok: true, duplicate: true, application: existing });
       }
       if (createdBy && !isValidYears(input.yearsOfExperience))
-        return res.status(400).json({ error: "Years of Experience must be a whole number from 0 to 10." });
+        return res
+          .status(400)
+          .json({
+            error: "Years of Experience must be a whole number from 0 to 10.",
+          });
       if (!createdBy) {
         input.applicantCategory = categoryForYears(input.yearsOfExperience);
         const errors = validatePublicApplication(input, type);
@@ -1236,14 +1372,25 @@ app.post(
           return res.status(400).json({ error: errors.join(" "), errors });
         const category = String(input.applicantCategory || "");
         if (!["Fresher", "Experienced"].includes(category))
-          return res.status(400).json({ error: "Please select Fresher or Experienced." });
+          return res
+            .status(400)
+            .json({ error: "Please select Fresher or Experienced." });
         const aadhaar = req.files?.aadhaarCard?.[0];
-        if (!aadhaar) return res.status(400).json({ error: "Please upload your Aadhaar Card." });
+        if (!aadhaar)
+          return res
+            .status(400)
+            .json({ error: "Please upload your Aadhaar Card." });
         if (category === "Experienced") {
           const months = Number(input.salarySlipMonths);
           const slips = req.files?.salarySlips || [];
-          if (![3, 6].includes(months)) return res.status(400).json({ error: "Select 3-month or 6-month salary slips." });
-          if (slips.length !== months) return res.status(400).json({ error: `Upload exactly ${months} salary slip files.` });
+          if (![3, 6].includes(months))
+            return res
+              .status(400)
+              .json({ error: "Select 3-month or 6-month salary slips." });
+          if (slips.length !== months)
+            return res
+              .status(400)
+              .json({ error: `Upload exactly ${months} salary slip files.` });
         }
       }
       const fields = recordFields(input, type);
@@ -1256,12 +1403,25 @@ app.post(
       if (!createdBy) {
         const aadhaar = req.files?.aadhaarCard?.[0];
         const salarySlips = req.files?.salarySlips || [];
-        const incoming = [...(aadhaar ? [{ file: aadhaar, kind: "Aadhaar Card" }] : []), ...salarySlips.map((file, index) => ({ file, kind: `Salary Slip ${index + 1}` }))];
+        const incoming = [
+          ...(aadhaar ? [{ file: aadhaar, kind: "Aadhaar Card" }] : []),
+          ...salarySlips.map((file, index) => ({
+            file,
+            kind: `Salary Slip ${index + 1}`,
+          })),
+        ];
         for (const item of incoming) {
           const mime = sniffPartnerFile(item.file.buffer);
           if (!mime) {
-            for (const saved of storedPaths) try { fs.unlinkSync(saved); } catch {}
-            return res.status(400).json({ error: "Documents must be valid PDF, JPG or PNG files." });
+            for (const saved of storedPaths)
+              try {
+                fs.unlinkSync(saved);
+              } catch {}
+            return res
+              .status(400)
+              .json({
+                error: "Documents must be valid PDF, JPG or PNG files.",
+              });
           }
         }
         const docDir = path.join(UPLOAD_DIR, "partner-applications", id);
@@ -1271,9 +1431,21 @@ app.post(
           const docId = crypto.randomUUID();
           const storedName = docId + ".enc";
           const target = path.join(docDir, storedName);
-          fs.writeFileSync(target, encryptPartnerDocument(item.file.buffer), { flag: "wx", mode: 0o600 });
+          fs.writeFileSync(target, encryptPartnerDocument(item.file.buffer), {
+            flag: "wx",
+            mode: 0o600,
+          });
           storedPaths.push(target);
-          documents.push({ id: docId, type: item.kind, name: path.basename(item.file.originalname || item.kind).slice(0, 120), mime, size: item.file.size, storedName });
+          documents.push({
+            id: docId,
+            type: item.kind,
+            name: path
+              .basename(item.file.originalname || item.kind)
+              .slice(0, 120),
+            mime,
+            size: item.file.size,
+            storedName,
+          });
         }
       }
       const status =
@@ -1333,50 +1505,98 @@ app.post(
       const willEmail =
         !createdBy &&
         EMAIL_OK.test(String(payload.email || "").trim()) &&
-        (gmailApi.configured() || (!!getMailTransporter() && mailCheck.ready === true));
-      const responseApplication = { ...payload, documents: documents.map(({ storedName, ...doc }) => doc) };
-      res.status(201).json({ ok: true, application: responseApplication, confirmationEmail: willEmail });
+        (gmailApi.configured() ||
+          (!!getMailTransporter() && mailCheck.ready === true));
+      const responseApplication = {
+        ...payload,
+        documents: documents.map(({ storedName, ...doc }) => doc),
+      };
+      res
+        .status(201)
+        .json({
+          ok: true,
+          application: responseApplication,
+          confirmationEmail: willEmail,
+        });
       if (adminNote?.created) {
-        broadcastAdminNotification({ id: adminNote.id, applicationId: id, appId, type, name: payload.name });
-        await adminNotifications.sendEmail(adminNote.id, { actor: "system" }).catch((e) => console.error("Admin email:", e.message));
+        broadcastAdminNotification({
+          id: adminNote.id,
+          applicationId: id,
+          appId,
+          type,
+          name: payload.name,
+        });
+        await adminNotifications
+          .sendEmail(adminNote.id, { actor: "system" })
+          .catch((e) => console.error("Admin email:", e.message));
       }
       if (!createdBy)
-        sendWithRetry(() => emailApplicant(payload, submittedEmail(payload, { supportEmail: SUPPORT_EMAIL })))
+        sendWithRetry(() =>
+          emailApplicant(
+            payload,
+            submittedEmail(payload, { supportEmail: SUPPORT_EMAIL }),
+          ),
+        )
           .then((r) => recordApplicantEmail(id, "submitted", r))
           .catch((e) => console.error("Submission email:", e.message));
     } catch (err) {
-      for (const saved of storedPaths) try { fs.unlinkSync(saved); } catch {}
+      for (const saved of storedPaths)
+        try {
+          fs.unlinkSync(saved);
+        } catch {}
       const key = String(req.body?.submissionKey || "").trim();
       const dup = key ? await findApplicationByKey(key) : null;
       if (key && /unique/i.test(String(err?.message || "")) && dup)
-        return res.status(200).json({ ok: true, duplicate: true, application: dup });
+        return res
+          .status(200)
+          .json({ ok: true, duplicate: true, application: dup });
       console.error("Partner application save:", err);
       res.status(500).json({ error: "Could not save application" });
     }
   },
 );
 
-app.get("/api/partner-applications/:id/documents/:docId", adminGuard, async (req, res) => {
-  try {
-    const row = await db
-      .prepare("SELECT payload FROM partner_applications WHERE id=?")
-      .get(String(req.params.id));
-    if (!row) return res.status(404).json({ error: "Application not found." });
-    const appRecord = JSON.parse(row.payload);
-    const doc = (appRecord.documents || []).find((d) => d.id === req.params.docId);
-    if (!doc || !/^[a-f0-9-]{36}\.enc$/.test(doc.storedName || "")) return res.status(404).json({ error: "Document not found." });
-    const filePath = path.join(UPLOAD_DIR, "partner-applications", String(req.params.id), doc.storedName);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: "Stored document is missing." });
-    const plaintext = decryptPartnerDocument(fs.readFileSync(filePath));
-    await audit(await adminEmailOf(req), "partner_document_downloaded", { appId: appRecord.appId, documentType: doc.type });
-    res.setHeader("Content-Type", doc.mime);
-    res.setHeader("Content-Disposition", `attachment; filename="${String(doc.name || "document").replace(/[\\"\r\n]/g, "_")}"`);
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    res.send(plaintext);
-  } catch {
-    res.status(500).json({ error: "Could not retrieve document." });
-  }
-});
+app.get(
+  "/api/partner-applications/:id/documents/:docId",
+  adminGuard,
+  async (req, res) => {
+    try {
+      const row = await db
+        .prepare("SELECT payload FROM partner_applications WHERE id=?")
+        .get(String(req.params.id));
+      if (!row)
+        return res.status(404).json({ error: "Application not found." });
+      const appRecord = JSON.parse(row.payload);
+      const doc = (appRecord.documents || []).find(
+        (d) => d.id === req.params.docId,
+      );
+      if (!doc || !/^[a-f0-9-]{36}\.enc$/.test(doc.storedName || ""))
+        return res.status(404).json({ error: "Document not found." });
+      const filePath = path.join(
+        UPLOAD_DIR,
+        "partner-applications",
+        String(req.params.id),
+        doc.storedName,
+      );
+      if (!fs.existsSync(filePath))
+        return res.status(404).json({ error: "Stored document is missing." });
+      const plaintext = decryptPartnerDocument(fs.readFileSync(filePath));
+      await audit(await adminEmailOf(req), "partner_document_downloaded", {
+        appId: appRecord.appId,
+        documentType: doc.type,
+      });
+      res.setHeader("Content-Type", doc.mime);
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${String(doc.name || "document").replace(/[\\"\r\n]/g, "_")}"`,
+      );
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.send(plaintext);
+    } catch {
+      res.status(500).json({ error: "Could not retrieve document." });
+    }
+  },
+);
 
 app.patch("/api/partner-applications/:id", adminGuard, async (req, res) => {
   try {
@@ -1407,12 +1627,13 @@ app.patch("/api/partner-applications/:id", adminGuard, async (req, res) => {
       return res
         .status(400)
         .json({ error: "Date of Birth is not a valid past date." });
-    if (changes.yearsOfExperience !== undefined && !isValidYears(changes.yearsOfExperience))
-      return res
-        .status(400)
-        .json({
-          error: "Years of Experience must be a whole number from 0 to 10.",
-        });
+    if (
+      changes.yearsOfExperience !== undefined &&
+      !isValidYears(changes.yearsOfExperience)
+    )
+      return res.status(400).json({
+        error: "Years of Experience must be a whole number from 0 to 10.",
+      });
     const synced = {};
     for (const [from, to] of Object.entries(PARTNER_ALIAS))
       if (changes[from] !== undefined) synced[to] = changes[from];
@@ -1474,7 +1695,9 @@ app.patch("/api/partner-applications/:id", adminGuard, async (req, res) => {
       saved = next;
     const statusChanged = next.status !== current.status;
     if (next.status === "Accepted" && statusChanged) {
-      const out = await decisionFollowUp(req, next, "Accepted", { notify: input.notify !== false });
+      const out = await decisionFollowUp(req, next, "Accepted", {
+        notify: input.notify !== false,
+      });
       credentials = out.credentials;
       applicantEmail = out.email;
       saved = out.application;
@@ -1482,12 +1705,23 @@ app.patch("/api/partner-applications/:id", adminGuard, async (req, res) => {
       const r = await auth.ensurePartnerAccount(next);
       if (r.password) {
         const login = loginFor(req, next, r.account.login_id, r.password);
-        applicantEmail = await emailApplicant(next, approvedEmail(next, { login, supportEmail: SUPPORT_EMAIL }));
+        applicantEmail = await emailApplicant(
+          next,
+          approvedEmail(next, { login, supportEmail: SUPPORT_EMAIL }),
+        );
         credentials = credentialsFor(req, next, login, applicantEmail);
-        saved = (await recordApplicantEmail(next.id, "approved", applicantEmail, req.adminEmail)) || next;
+        saved =
+          (await recordApplicantEmail(
+            next.id,
+            "approved",
+            applicantEmail,
+            req.adminEmail,
+          )) || next;
       }
     } else if (next.status === "Rejected" && statusChanged) {
-      const out = await decisionFollowUp(req, next, "Rejected", { notify: input.notify !== false });
+      const out = await decisionFollowUp(req, next, "Rejected", {
+        notify: input.notify !== false,
+      });
       applicantEmail = out.email;
       saved = out.application;
     } else if (current.status === "Accepted") {
@@ -1495,7 +1729,12 @@ app.patch("/api/partner-applications/:id", adminGuard, async (req, res) => {
     } else {
       await auth.syncPartnerAccount(next);
     }
-    res.json({ ok: true, application: await withLogin(saved), credentials, applicantEmail });
+    res.json({
+      ok: true,
+      application: await withLogin(saved),
+      credentials,
+      applicantEmail,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Could not update application" });
@@ -1533,7 +1772,9 @@ app.post(
           .slice(0, 1000);
       }
       await db
-        .prepare("UPDATE partner_applications SET status=?,payload=? WHERE id=?")
+        .prepare(
+          "UPDATE partner_applications SET status=?,payload=? WHERE id=?",
+        )
         .run(next.status, JSON.stringify(next), current.id);
       await audit(
         req.adminEmail,
@@ -1593,7 +1834,10 @@ async function recordBan(id, entry) {
     .get(id);
   if (!row) return null;
   const p = JSON.parse(row.payload);
-  p.banLog = [...(Array.isArray(p.banLog) ? p.banLog : []), { ...entry, at: new Date().toISOString() }].slice(-50);
+  p.banLog = [
+    ...(Array.isArray(p.banLog) ? p.banLog : []),
+    { ...entry, at: new Date().toISOString() },
+  ].slice(-50);
   await db
     .prepare("UPDATE partner_applications SET payload=? WHERE id=?")
     .run(JSON.stringify(p), id);
@@ -1603,14 +1847,19 @@ async function recordBan(id, entry) {
 app.post("/api/partner-applications/:id/ban", adminGuard, async (req, res) => {
   try {
     const id = String(req.params.id);
-    if (!(await db.prepare("SELECT 1 FROM partner_applications WHERE id=?").get(id)))
+    if (
+      !(await db
+        .prepare("SELECT 1 FROM partner_applications WHERE id=?")
+        .get(id))
+    )
       return res.status(404).json({ error: "Application not found" });
     const out = await auth.banPartner(id, {
       until: req.body?.until || "",
       reason: req.body?.reason || "",
       actor: req.adminEmail,
     });
-    if (!out.ok) return res.status(out.status || 400).json({ error: out.error });
+    if (!out.ok)
+      return res.status(out.status || 400).json({ error: out.error });
     const saved = await recordBan(id, {
       action: "banned",
       by: req.adminEmail,
@@ -1623,28 +1872,51 @@ app.post("/api/partner-applications/:id/ban", adminGuard, async (req, res) => {
       until: out.ban.until || "until unbanned",
       reason: out.ban.reason,
     });
-    res.json({ ok: true, application: await withLogin(saved), message: banMessage(out.ban, out.account.role) });
+    res.json({
+      ok: true,
+      application: await withLogin(saved),
+      message: banMessage(out.ban, out.account.role),
+    });
   } catch (err) {
     console.error("Ban failed:", err.message);
-    res.status(500).json({ error: "Could not ban the login. Please try again." });
+    res
+      .status(500)
+      .json({ error: "Could not ban the login. Please try again." });
   }
 });
 
-app.post("/api/partner-applications/:id/unban", adminGuard, async (req, res) => {
-  try {
-    const id = String(req.params.id);
-    if (!(await db.prepare("SELECT 1 FROM partner_applications WHERE id=?").get(id)))
-      return res.status(404).json({ error: "Application not found" });
-    const out = await auth.unbanPartner(id);
-    if (!out.ok) return res.status(out.status || 400).json({ error: out.error });
-    const saved = await recordBan(id, { action: "unbanned", by: req.adminEmail });
-    await audit(req.adminEmail, "partner_unbanned", { appId: saved?.appId, loginId: out.account.login_id });
-    res.json({ ok: true, application: await withLogin(saved) });
-  } catch (err) {
-    console.error("Unban failed:", err.message);
-    res.status(500).json({ error: "Could not unban the login. Please try again." });
-  }
-});
+app.post(
+  "/api/partner-applications/:id/unban",
+  adminGuard,
+  async (req, res) => {
+    try {
+      const id = String(req.params.id);
+      if (
+        !(await db
+          .prepare("SELECT 1 FROM partner_applications WHERE id=?")
+          .get(id))
+      )
+        return res.status(404).json({ error: "Application not found" });
+      const out = await auth.unbanPartner(id);
+      if (!out.ok)
+        return res.status(out.status || 400).json({ error: out.error });
+      const saved = await recordBan(id, {
+        action: "unbanned",
+        by: req.adminEmail,
+      });
+      await audit(req.adminEmail, "partner_unbanned", {
+        appId: saved?.appId,
+        loginId: out.account.login_id,
+      });
+      res.json({ ok: true, application: await withLogin(saved) });
+    } catch (err) {
+      console.error("Unban failed:", err.message);
+      res
+        .status(500)
+        .json({ error: "Could not unban the login. Please try again." });
+    }
+  },
+);
 
 app.post(
   "/api/partner-applications/:id/portal-login",
@@ -1673,7 +1945,13 @@ app.post(
           ? approvedEmail(app, { login, supportEmail: SUPPORT_EMAIL })
           : newPasswordEmail(app, { login, supportEmail: SUPPORT_EMAIL }),
       );
-      const saved = (await recordApplicantEmail(app.id, r.created ? "login_created" : "new_password", email, req.adminEmail)) || app;
+      const saved =
+        (await recordApplicantEmail(
+          app.id,
+          r.created ? "login_created" : "new_password",
+          email,
+          req.adminEmail,
+        )) || app;
       res.json({
         ok: true,
         application: await withLogin(saved),
@@ -1689,13 +1967,19 @@ app.post(
 app.get("/api/partner-applications", adminGuard, async (req, res) => {
   try {
     const rows = await db
-      .prepare("SELECT payload FROM partner_applications ORDER BY submitted_at DESC")
+      .prepare(
+        "SELECT payload FROM partner_applications ORDER BY submitted_at DESC",
+      )
       .all();
     const logins = await auth.accountsByApplication();
     res.json(
       rows.map((r) => {
         const a = JSON.parse(r.payload);
-        return { ...a, documents: (a.documents || []).map(({ storedName, ...doc }) => doc), portalLogin: logins.get(a.id) || null };
+        return {
+          ...a,
+          documents: (a.documents || []).map(({ storedName, ...doc }) => doc),
+          portalLogin: logins.get(a.id) || null,
+        };
       }),
     );
   } catch {
@@ -1709,7 +1993,10 @@ async function findApplicationByKey(key) {
     .get(key);
   if (!row) return null;
   const a = JSON.parse(row.payload);
-  return { ...a, documents: (a.documents || []).map(({ storedName, ...doc }) => doc) };
+  return {
+    ...a,
+    documents: (a.documents || []).map(({ storedName, ...doc }) => doc),
+  };
 }
 
 const adminNotifications = await createAdminNotifications({
@@ -1758,7 +2045,9 @@ app.get("/api/admin/notifications/stream", adminGuard, async (req, res) => {
   const client = { res, accountId: req.account.id };
   adminStreams.add(client);
   const unread = await adminNotifications.unreadCount(req.account.id);
-  res.write(`event: ready\ndata: ${JSON.stringify({ unreadCount: unread })}\n\n`);
+  res.write(
+    `event: ready\ndata: ${JSON.stringify({ unreadCount: unread })}\n\n`,
+  );
   const heartbeat = setInterval(async () => {
     if (!(await auth.getSession(req, "admin"))) {
       cleanup();
@@ -1775,25 +2064,59 @@ app.get("/api/admin/notifications/stream", adminGuard, async (req, res) => {
 
 function notificationAction(read) {
   return async (req, res) => {
-    const ok = await adminNotifications.setRead(req.account.id, String(req.params.id), read);
+    const ok = await adminNotifications.setRead(
+      req.account.id,
+      String(req.params.id),
+      read,
+    );
     if (!ok) return res.status(404).json({ error: "Notification not found." });
-    res.json({ ok: true, unreadCount: await adminNotifications.unreadCount(req.account.id) });
+    res.json({
+      ok: true,
+      unreadCount: await adminNotifications.unreadCount(req.account.id),
+    });
   };
 }
-app.post("/api/admin/notifications/:id/read", adminGuard, notificationAction(true));
-app.post("/api/admin/notifications/:id/unread", adminGuard, notificationAction(false));
-app.post("/api/admin/notifications/:id/delete", adminGuard, async (req, res) => {
-  const ok = await adminNotifications.remove(req.account.id, String(req.params.id));
-  if (!ok) return res.status(404).json({ error: "Notification not found." });
-  res.json({ ok: true, unreadCount: await adminNotifications.unreadCount(req.account.id) });
-});
-app.post("/api/admin/notifications/:id/resend-email", adminGuard, async (req, res) => {
-  const id = String(req.params.id);
-  if (!(await adminNotifications.exists(id, req.account.id)))
-    return res.status(404).json({ error: "Notification not found." });
-  const result = await adminNotifications.sendEmail(id, { actor: req.adminEmail });
-  res.json({ ok: !!result?.sent, emailStatus: await adminNotifications.emailStatusOf(id) });
-});
+app.post(
+  "/api/admin/notifications/:id/read",
+  adminGuard,
+  notificationAction(true),
+);
+app.post(
+  "/api/admin/notifications/:id/unread",
+  adminGuard,
+  notificationAction(false),
+);
+app.post(
+  "/api/admin/notifications/:id/delete",
+  adminGuard,
+  async (req, res) => {
+    const ok = await adminNotifications.remove(
+      req.account.id,
+      String(req.params.id),
+    );
+    if (!ok) return res.status(404).json({ error: "Notification not found." });
+    res.json({
+      ok: true,
+      unreadCount: await adminNotifications.unreadCount(req.account.id),
+    });
+  },
+);
+app.post(
+  "/api/admin/notifications/:id/resend-email",
+  adminGuard,
+  async (req, res) => {
+    const id = String(req.params.id);
+    if (!(await adminNotifications.exists(id, req.account.id)))
+      return res.status(404).json({ error: "Notification not found." });
+    const result = await adminNotifications.sendEmail(id, {
+      actor: req.adminEmail,
+    });
+    res.json({
+      ok: !!result?.sent,
+      emailStatus: await adminNotifications.emailStatusOf(id),
+    });
+  },
+);
 
 setTimeout(async () => {
   try {
@@ -2050,7 +2373,9 @@ const screenshotReadLimiter = rateLimit({
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "Too many screenshots were read. Please wait a few minutes." },
+  message: {
+    error: "Too many screenshots were read. Please wait a few minutes.",
+  },
 });
 app.post(
   "/api/read-rider-screenshot",
@@ -2073,7 +2398,9 @@ app.post(
       const f = req.file;
       if (!f || !f.size)
         return res.status(400).json({ error: "Choose a screenshot to read." });
-      if (!["image/jpeg", "image/png", "image/webp"].includes(sniffType(f.buffer)))
+      if (
+        !["image/jpeg", "image/png", "image/webp"].includes(sniffType(f.buffer))
+      )
         return res
           .status(400)
           .json({ error: "The screenshot must be a JPG, PNG or WEBP image." });
@@ -2263,7 +2590,9 @@ app.post("/api/admin/payment-import", adminGuard, async (req, res) => {
         shared: [],
         flagged: [],
       });
-    const versionRows = await paymentImports.rowsOf({ versionId: out.activeVersionId });
+    const versionRows = await paymentImports.rowsOf({
+      versionId: out.activeVersionId,
+    });
     const flagged = versionRows.rows
       .filter((r) => r.status === "review" || r.status === "unmatched")
       .map((r) => ({
@@ -2503,7 +2832,9 @@ app.post("/api/autopay/:id/pause", adminGuard, async (req, res) => {
       { method: "POST", body: JSON.stringify({ pause_at: "now" }) },
     );
     await db
-      .prepare("UPDATE subscriptions SET status=? WHERE gateway_subscription_id=?")
+      .prepare(
+        "UPDATE subscriptions SET status=? WHERE gateway_subscription_id=?",
+      )
       .run("Paused", req.params.id);
     await audit(req.adminEmail, "autopay_paused", { id: req.params.id });
     res.json(out);
@@ -2519,7 +2850,9 @@ app.post("/api/autopay/:id/resume", adminGuard, async (req, res) => {
       { method: "POST", body: JSON.stringify({ resume_at: "now" }) },
     );
     await db
-      .prepare("UPDATE subscriptions SET status=? WHERE gateway_subscription_id=?")
+      .prepare(
+        "UPDATE subscriptions SET status=? WHERE gateway_subscription_id=?",
+      )
       .run("Active", req.params.id);
     await audit(req.adminEmail, "autopay_resumed", { id: req.params.id });
     res.json(out);
@@ -2535,7 +2868,9 @@ app.post("/api/autopay/:id/cancel", adminGuard, async (req, res) => {
       { method: "POST", body: JSON.stringify({ cancel_at_cycle_end: 0 }) },
     );
     await db
-      .prepare("UPDATE subscriptions SET status=? WHERE gateway_subscription_id=?")
+      .prepare(
+        "UPDATE subscriptions SET status=? WHERE gateway_subscription_id=?",
+      )
       .run("Cancelled", req.params.id);
     await audit(req.adminEmail, "autopay_cancelled", { id: req.params.id });
     res.json(out);
@@ -2545,7 +2880,9 @@ app.post("/api/autopay/:id/cancel", adminGuard, async (req, res) => {
 });
 
 // ===================== Helpline / Support =====================
-app.get("/api/support-info", (req, res) => res.json({ ok: true, email: SUPPORT_EMAIL }));
+app.get("/api/support-info", (req, res) =>
+  res.json({ ok: true, email: SUPPORT_EMAIL }),
+);
 let mailTransporter = null;
 function getMailTransporter() {
   if (process.env.SMTP_HOST) {
@@ -2588,7 +2925,14 @@ const oneLine = (v) =>
 
 async function supportAdminRecipients() {
   if (process.env.ADMIN_EMAIL)
-    return [...new Set(String(process.env.ADMIN_EMAIL).split(",").map((a) => a.trim()).filter(Boolean))];
+    return [
+      ...new Set(
+        String(process.env.ADMIN_EMAIL)
+          .split(",")
+          .map((a) => a.trim())
+          .filter(Boolean),
+      ),
+    ];
   const rows = await db
     .prepare(
       "SELECT email FROM accounts WHERE role='admin' AND status='active' AND email IS NOT NULL AND email<>''",
@@ -2607,7 +2951,10 @@ function smtpProblem() {
 async function sendSupportMail(message) {
   if (gmailApi.configured()) return gmailApi.sendMail(message);
   const problem = smtpProblem();
-  if (!getMailTransporter()) throw new Error(`Email is not configured: ${problem || "set GMAIL_APP_PASSWORD or GMAIL_OAUTH_* in backend/.env"}`);
+  if (!getMailTransporter())
+    throw new Error(
+      `Email is not configured: ${problem || "set GMAIL_APP_PASSWORD or GMAIL_OAUTH_* in backend/.env"}`,
+    );
   const mail = getMailTransporter();
   return mail.transporter.sendMail({
     from: { name: "ON THE WAY LOGISTICS Support", address: mail.user },
@@ -2620,7 +2967,10 @@ console.log(
     : `[support-email] Gmail API not connected; using SMTP. ${smtpProblem() || "SMTP password found."}`,
 );
 
-const supportService = await createSupportService({ db, uploadDir: UPLOAD_DIR });
+const supportService = await createSupportService({
+  db,
+  uploadDir: UPLOAD_DIR,
+});
 const supportMailer = await createSupportMailer({
   db,
   uploadDir: UPLOAD_DIR,
@@ -2645,7 +2995,13 @@ registerSupportRoutes(app, {
   baseUrl: process.env.PUBLIC_URL || "",
 });
 {
-  const emailTimer = setInterval(() => supportMailer.runDue().catch((e) => console.error("[support-email]", e.message)), 30_000);
+  const emailTimer = setInterval(
+    () =>
+      supportMailer
+        .runDue()
+        .catch((e) => console.error("[support-email]", e.message)),
+    30_000,
+  );
   emailTimer.unref?.();
   supportMailer.runDue().catch(() => {});
   supportInbound.start(60_000);
@@ -2743,7 +3099,11 @@ if (fs.existsSync(FRONTEND_DIR)) {
   app.use(express.static(FRONTEND_DIR, { index: "index.html" }));
 } else {
   app.get("/", (req, res) =>
-    res.json({ ok: true, service: "On The Way Logistics API", note: "The website is hosted separately." }),
+    res.json({
+      ok: true,
+      service: "On The Way Logistics API",
+      note: "The website is hosted separately.",
+    }),
   );
 }
 
@@ -2775,7 +3135,9 @@ app.listen(PORT, (err) => {
     else console.error(`\n  NOT STARTED: ${err.message}\n`);
     process.exit(1);
   }
-  console.log(`On The Way Logistics (Version 12 · 15 Nov 2026) running on http://localhost:${PORT}`);
+  console.log(
+    `On The Way Logistics (Version 12 · 15 Nov 2026) running on http://localhost:${PORT}`,
+  );
   console.log(`  Database:      Supabase PostgreSQL (DATABASE_URL)`);
   mailStatus().then((m) =>
     console.log(

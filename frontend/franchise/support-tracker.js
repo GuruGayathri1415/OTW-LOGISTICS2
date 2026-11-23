@@ -29,7 +29,31 @@
     return `<span class="badge ${cls}">${esc(s)}</span>`;
   };
 
-  const state = { tickets: [], open: null, photoUrl: "", signedOut: false, error: "" };
+  const state = {
+    tickets: [],
+    open: null,
+    photoUrl: "",
+    signedOut: false,
+    error: "",
+    rateLimitedUntil: 0,
+    refreshing: false,
+  };
+
+  function parseRetryAfterMs(r, out) {
+    const retryHeader = r.headers.get("retry-after");
+    if (retryHeader) {
+      const secs = Number(retryHeader);
+      if (Number.isFinite(secs) && secs > 0) return Math.min(secs * 1000, 10 * 60_000);
+      const parsedDate = Date.parse(retryHeader);
+      if (!Number.isNaN(parsedDate) && parsedDate > Date.now()) {
+        return Math.min(parsedDate - Date.now(), 10 * 60_000);
+      }
+    }
+    if (out && typeof out.retryAfter === "number" && out.retryAfter > 0) {
+      return Math.min(out.retryAfter * 1000, 10 * 60_000);
+    }
+    return 60_000;
+  }
 
   async function call(path, opts = {}) {
     const r = await fetch(base() + path, {
@@ -44,20 +68,48 @@
       err.signedOut = true;
       throw err;
     }
+    if (r.status === 429) {
+      const waitMs = parseRetryAfterMs(r, out);
+      const err = new Error(
+        out.error ||
+          `Too many requests right now. Please wait ${Math.ceil(waitMs / 1000)}s and try again.`,
+      );
+      err.rateLimited = true;
+      err.retryAfterMs = waitMs;
+      throw err;
+    }
     if (!r.ok) throw new Error(out.error || "Request failed (" + r.status + ")");
     return out;
   }
 
-  async function refresh() {
+  async function refresh({ manual = false } = {}) {
+    if (!manual && Date.now() < state.rateLimitedUntil) {
+      const secsLeft = Math.max(1, Math.ceil((state.rateLimitedUntil - Date.now()) / 1000));
+      state.error = `Too many requests. Automatic refresh paused for ${secsLeft}s.`;
+      paint();
+      return;
+    }
+    if (state.refreshing) return;
+    state.refreshing = true;
     try {
       const out = await call("/api/support/mine");
       state.tickets = out.tickets || [];
       state.signedOut = false;
       state.error = "";
+      state.rateLimitedUntil = 0;
     } catch (e) {
       state.signedOut = !!e.signedOut;
-      state.error = e.signedOut ? "" : e.message;
-      if (e.signedOut) forget();
+      if (e.signedOut) {
+        forget();
+        state.error = "";
+      } else if (e.rateLimited) {
+        state.rateLimitedUntil = Date.now() + (e.retryAfterMs || 60_000);
+        state.error = e.message;
+      } else {
+        state.error = e.message;
+      }
+    } finally {
+      state.refreshing = false;
     }
     paint();
   }
@@ -67,6 +119,7 @@
     state.tickets = [];
     state.open = null;
     state.photoUrl = "";
+    state.rateLimitedUntil = 0;
   }
 
   function paint() {
@@ -108,7 +161,12 @@
       if (e.signedOut) {
         forget();
         state.signedOut = true;
-      } else state.error = e.message;
+      } else if (e.rateLimited) {
+        state.rateLimitedUntil = Date.now() + (e.retryAfterMs || 60_000);
+        state.error = e.message;
+      } else {
+        state.error = e.message;
+      }
       paint();
     }
   }
@@ -160,10 +218,10 @@
   root.addEventListener("click", async (e) => {
     const openBtn = e.target.closest("[data-track-open]");
     if (openBtn) return open(openBtn.dataset.trackOpen);
-    if (e.target.closest("[data-track-refresh]")) return refresh();
+    if (e.target.closest("[data-track-refresh]")) return refresh({ manual: true });
     if (e.target.closest("[data-track-back]")) {
       state.open = null;
-      return refresh();
+      return refresh({ manual: true });
     }
     const send = e.target.closest("[data-track-send]");
     if (send) {
@@ -201,7 +259,7 @@
   window.OTWSupportTracker = { refresh, reset };
   refresh();
   setInterval(() => {
-    if (!state.open) refresh();
+    if (!state.open && !document.hidden) refresh();
   }, 60_000);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && !state.open) refresh();
