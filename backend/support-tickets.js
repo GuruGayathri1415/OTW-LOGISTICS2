@@ -29,6 +29,14 @@ export function sameAddress(a, b) {
 const ALLOWED_STATUSES = new Set(SUPPORT_STATUSES);
 const ALLOWED_PRIORITIES = new Set(["low", "normal", "high", "urgent"]);
 
+const MIME_TO_EXT = {
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+};
+
 export const TEXT_LIMITS = {
   name: 160,
   email: 254,
@@ -218,8 +226,13 @@ export async function createSupportService({ db, uploadDir }) {
       .all(...params);
   }
 
-  function formatTicketRow(row, firstMessage = "") {
+  function formatTicketRow(row, firstMessage = "", attachments = []) {
     if (!row) return null;
+    const atts = Array.isArray(attachments) ? attachments : [];
+    const primaryPhoto =
+      atts.find((a) => String(a.mime || "").startsWith("image/")) ||
+      atts[0] ||
+      null;
     return {
       ...row,
       ticket_no: row.ticket_code,
@@ -227,12 +240,18 @@ export async function createSupportService({ db, uploadDir }) {
       email: row.requester_email || "",
       portal_type: row.requester_role || "",
       description: firstMessage || row.subject || "",
+      attachments: atts,
+      hasPhoto: Boolean(primaryPhoto),
+      photoName: primaryPhoto?.original_name || "",
+      photoMime: primaryPhoto?.mime || "",
     };
   }
 
   async function listForAdmin({ status = "", portal = "", q = "" } = {}) {
     const rows = await listTickets({ status, search: q, limit: 250 });
-    const portalFilter = String(portal || "").trim().toLowerCase();
+    const portalFilter = String(portal || "")
+      .trim()
+      .toLowerCase();
     const filtered = portalFilter
       ? rows.filter(
           (r) => String(r.requester_role || "").toLowerCase() === portalFilter,
@@ -250,8 +269,14 @@ export async function createSupportService({ db, uploadDir }) {
       closed: allRows.filter((r) => r.status === "closed").length,
     };
 
+    const tickets = await Promise.all(
+      filtered.map(async (r) =>
+        formatTicketRow(r, "", await listAttachments(r.id)),
+      ),
+    );
+
     return {
-      tickets: filtered.map((r) => formatTicketRow(r)),
+      tickets,
       summary,
     };
   }
@@ -263,7 +288,7 @@ export async function createSupportService({ db, uploadDir }) {
     const attachments = await listAttachments(ticket.id);
     const firstMsg = events.find((e) => e.body)?.body || "";
     return {
-      ticket: formatTicketRow(ticket, firstMsg),
+      ticket: formatTicketRow(ticket, firstMsg, attachments),
       events,
       attachments,
     };
@@ -273,7 +298,11 @@ export async function createSupportService({ db, uploadDir }) {
     const acctId = String(account?.id || account?.login_id || "");
     if (!acctId) return [];
     const rows = await listTickets({ requesterId: acctId, limit: 100 });
-    return rows.map((r) => formatTicketRow(r));
+    return Promise.all(
+      rows.map(async (r) =>
+        formatTicketRow(r, "", await listAttachments(r.id)),
+      ),
+    );
   }
 
   async function getForAccount(idOrCode, account) {
@@ -286,7 +315,7 @@ export async function createSupportService({ db, uploadDir }) {
     const attachments = await listAttachments(ticket.id);
     const firstMsg = events.find((e) => e.body)?.body || "";
     return {
-      ticket: formatTicketRow(ticket, firstMsg),
+      ticket: formatTicketRow(ticket, firstMsg, attachments),
       events,
       attachments,
     };
@@ -306,15 +335,23 @@ export async function createSupportService({ db, uploadDir }) {
   async function photoFor(ticketRow) {
     if (!ticketRow?.id) return null;
     const atts = await listAttachments(ticketRow.id);
-    const att = atts.find((a) => String(a.mime || "").startsWith("image/")) || atts[0];
-    if (!att) return null;
-    const abs = path.join(supportUploadRoot, String(ticketRow.id), att.stored_name);
+    const att =
+      atts.find((a) => String(a.mime || "").startsWith("image/")) || atts[0];
+    if (!att || !att.stored_name) return null;
+    const abs = path.join(
+      supportUploadRoot,
+      String(ticketRow.id),
+      att.stored_name,
+    );
+    const rootWithSep = supportUploadRoot + path.sep;
+    if (!abs.startsWith(rootWithSep) || !fs.existsSync(abs)) return null;
     return { abs, mime: att.mime, name: att.original_name };
   }
 
   async function partnerFollowUp(idOrCode, partner, messageText) {
     const text = cleanText(messageText, 10_000);
-    if (!text) throw new SupportError("Please enter a message.", 400, "message");
+    if (!text)
+      throw new SupportError("Please enter a message.", 400, "message");
     const ticket = await resolveTicket(idOrCode);
     const acctId = String(partner?.id || partner?.login_id || "");
     if (!ticket || String(ticket.requester_id || "") !== acctId) {
@@ -330,7 +367,11 @@ export async function createSupportService({ db, uploadDir }) {
     });
     const updated = await getTicketById(ticket.id);
     const detail = await getForAccount(ticket.id, partner);
-    return { ticket: formatTicketRow(updated, text), eventId: ev.id, detail };
+    return {
+      ticket: formatTicketRow(updated, text, detail.attachments),
+      eventId: ev.id,
+      detail,
+    };
   }
 
   async function adminReply(idOrCode, actor, messageText) {
@@ -347,7 +388,11 @@ export async function createSupportService({ db, uploadDir }) {
       body: text,
     });
     const updated = await getTicketById(ticket.id);
-    return { ticket: formatTicketRow(updated, text), eventId: ev.id };
+    const attachments = await listAttachments(ticket.id);
+    return {
+      ticket: formatTicketRow(updated, text, attachments),
+      eventId: ev.id,
+    };
   }
 
   async function setStatus(idOrCode, actor, status, note = "") {
@@ -364,7 +409,11 @@ export async function createSupportService({ db, uploadDir }) {
     const events = await listEvents(ticket.id);
     const attachments = await listAttachments(ticket.id);
     return {
-      ticket: formatTicketRow(updated, events.find((e) => e.body)?.body || ""),
+      ticket: formatTicketRow(
+        updated,
+        events.find((e) => e.body)?.body || "",
+        attachments,
+      ),
       events,
       attachments,
     };
@@ -383,13 +432,16 @@ export async function createSupportService({ db, uploadDir }) {
   }) {
     if (submissionKey) {
       const existingEv = await db
-        .prepare("SELECT ticket_id FROM support_ticket_events WHERE message_id=?")
+        .prepare(
+          "SELECT ticket_id FROM support_ticket_events WHERE message_id=?",
+        )
         .get(`sub:${submissionKey}`);
       if (existingEv?.ticket_id) {
         const existingTicket = await getTicketById(existingEv.ticket_id);
         if (existingTicket) {
+          const atts = await listAttachments(existingTicket.id);
           return {
-            ticket: formatTicketRow(existingTicket, description),
+            ticket: formatTicketRow(existingTicket, description, atts),
             duplicate: true,
           };
         }
@@ -417,7 +469,7 @@ export async function createSupportService({ db, uploadDir }) {
     });
 
     return {
-      ticket: formatTicketRow(created.ticket, description),
+      ticket: formatTicketRow(created.ticket, description, created.attachments),
       duplicate: false,
     };
   }
@@ -616,7 +668,10 @@ export async function createSupportService({ db, uploadDir }) {
 
   async function saveAttachment({ ticketId, eventId = null, file }) {
     const attId = crypto.randomUUID();
-    const ext = path.extname(String(file.originalname || "")).slice(0, 12);
+    const mime = cleanText(file.mimetype, 120) || "application/octet-stream";
+    const ext =
+      MIME_TO_EXT[mime.toLowerCase()] ||
+      path.extname(String(file.originalname || "")).slice(0, 12);
     const storedName = `${attId}${ext}`;
     const ticketDir = path.join(supportUploadRoot, String(ticketId));
     fs.mkdirSync(ticketDir, { recursive: true, mode: 0o700 });
@@ -642,7 +697,7 @@ export async function createSupportService({ db, uploadDir }) {
         String(ticketId),
         eventId ? String(eventId) : null,
         safeName,
-        cleanText(file.mimetype, 120) || "application/octet-stream",
+        mime,
         Number(file.size || 0),
         storedName,
         createdAt,

@@ -13,7 +13,13 @@
     String(v).replace(
       /[&<>'"]/g,
       (c) =>
-        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[c],
+        ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          "'": "&#39;",
+          '"': "&quot;",
+        })[c],
     );
   const when = (v) => {
     if (!v) return "";
@@ -46,7 +52,8 @@
     const retryHeader = r.headers.get("retry-after");
     if (retryHeader) {
       const secs = Number(retryHeader);
-      if (Number.isFinite(secs) && secs > 0) return Math.min(secs * 1000, 10 * 60_000);
+      if (Number.isFinite(secs) && secs > 0)
+        return Math.min(secs * 1000, 10 * 60_000);
       const parsedDate = Date.parse(retryHeader);
       if (!Number.isNaN(parsedDate) && parsedDate > Date.now()) {
         return Math.min(parsedDate - Date.now(), 10 * 60_000);
@@ -81,13 +88,17 @@
       err.retryAfterMs = waitMs;
       throw err;
     }
-    if (!r.ok) throw new Error(out.error || "Request failed (" + r.status + ")");
+    if (!r.ok)
+      throw new Error(out.error || "Request failed (" + r.status + ")");
     return out;
   }
 
   async function refresh({ manual = false } = {}) {
     if (!manual && Date.now() < state.rateLimitedUntil) {
-      const secsLeft = Math.max(1, Math.ceil((state.rateLimitedUntil - Date.now()) / 1000));
+      const secsLeft = Math.max(
+        1,
+        Math.ceil((state.rateLimitedUntil - Date.now()) / 1000),
+      );
       state.error = `Too many requests. Automatic refresh paused for ${secsLeft}s.`;
       paint();
       return;
@@ -134,9 +145,19 @@
     const rows = state.tickets.length
       ? state.tickets
           .map((t) => {
-            const ticketCode = t.ticketId || t.ticket_no || t.ticket_id || t.id || "";
+            const ticketCode =
+              t.ticketId ||
+              t.ticket_no ||
+              t.ticket_code ||
+              t.ticket_id ||
+              t.id ||
+              "";
             const submittedRaw =
-              t.submittedAt || t.submitted_at || t.createdAt || t.created_at || "";
+              t.submittedAt ||
+              t.submitted_at ||
+              t.created_at ||
+              t.createdAt ||
+              "";
             const latestReply =
               t.adminResponse || t.latestReply || t.latest_reply || "";
             return `<tr>
@@ -181,29 +202,36 @@
 
   function paintDetail() {
     const { ticket: t, events } = state.open;
-    const ticketCode = t.ticketId || t.ticket_no || t.ticket_id || t.id || "";
+    const ticketCode =
+      t.ticketId || t.ticket_no || t.ticket_code || t.ticket_id || t.id || "";
     const submittedRaw =
-      t.submittedAt || t.submitted_at || t.createdAt || t.created_at || "";
+      t.submittedAt || t.submitted_at || t.created_at || t.createdAt || "";
     const history = (events || [])
       .map((ev) => {
+        const role = ev.authorRole || ev.actor_role || ev.actorRole || "";
+        const kind = ev.kind || ev.event_type || ev.eventType || "";
+        const created = ev.createdAt || ev.created_at || "";
+        const nextStatus = ev.status || ev.meta?.to || "";
         const who =
-          ev.authorRole === "admin"
+          role === "admin"
             ? "Support team"
-            : ev.authorRole === "customer"
+            : role === "customer"
               ? "Customer"
               : "You";
         const label =
-          ev.kind === "submitted"
+          kind === "submitted" || kind === "created"
             ? "Request sent"
-            : ev.kind === "reply"
+            : kind === "reply" || kind === "admin_reply"
               ? "Reply from support"
-              : ev.kind === "customer_email"
+              : kind === "customer_email"
                 ? "Email from the customer"
-                : ev.kind === "followup"
+                : kind === "followup" || kind === "partner_followup"
                   ? "Your follow-up"
-                  : "Status changed to " + ev.status;
+                  : nextStatus
+                    ? "Status changed to " + nextStatus
+                    : "Activity update";
         return `<div class="support-event" style="margin:8px 0;padding:10px;border-radius:10px;background:rgba(0,0,0,.04)">
-          <div><b>${esc(label)}</b> · ${esc(who)} · <span class="muted">${esc(when(ev.createdAt || ev.created_at))}</span></div>
+          <div><b>${esc(label)}</b> · ${esc(who)} · <span class="muted">${esc(when(created))}</span></div>
           ${ev.body ? `<p style="margin:6px 0 0">${esc(ev.body)}</p>` : ""}</div>`;
       })
       .join("");
@@ -215,10 +243,14 @@
       <div id="trackPhoto"><span class="muted">Loading photo…</span></div>
       <h4>Conversation</h4>
       ${history || '<p class="muted">No messages yet.</p>'}
-      ${String(t.status || "").toLowerCase() === "closed" ? '<p class="muted">This ticket is closed. Please send a new request for a new issue.</p>' : `
+      ${
+        String(t.status || "").toLowerCase() === "closed"
+          ? '<p class="muted">This ticket is closed. Please send a new request for a new issue.</p>'
+          : `
       <label style="display:block;margin-top:12px">Add a follow-up
         <textarea id="trackFollowUp" rows="3" maxlength="2000" placeholder="Add more details for our support team"></textarea></label>
-      <div style="margin-top:8px"><button class="primary" type="button" data-track-send>Send follow-up</button></div>`}
+      <div style="margin-top:8px"><button class="primary" type="button" data-track-send>Send follow-up</button></div>`
+      }
       <p class="support-status" id="trackStatus"></p>`;
   }
 
@@ -228,7 +260,11 @@
         base() + "/api/support/mine/" + encodeURIComponent(id) + "/photo",
         { credentials: "include" },
       );
-      if (!r.ok) throw new Error("The photo could not be loaded.");
+      if (!r.ok) {
+        const box = document.getElementById("trackPhoto");
+        if (box) box.innerHTML = "";
+        return;
+      }
       state.photoUrl = URL.createObjectURL(await r.blob());
       const box = document.getElementById("trackPhoto");
       if (box)
@@ -243,7 +279,8 @@
   root.addEventListener("click", async (e) => {
     const openBtn = e.target.closest("[data-track-open]");
     if (openBtn) return open(openBtn.dataset.trackOpen);
-    if (e.target.closest("[data-track-refresh]")) return refresh({ manual: true });
+    if (e.target.closest("[data-track-refresh]"))
+      return refresh({ manual: true });
     if (e.target.closest("[data-track-back]")) {
       state.open = null;
       return refresh({ manual: true });
@@ -251,7 +288,9 @@
     const send = e.target.closest("[data-track-send]");
     if (send) {
       const status = document.getElementById("trackStatus");
-      const text = (document.getElementById("trackFollowUp")?.value || "").trim();
+      const text = (
+        document.getElementById("trackFollowUp")?.value || ""
+      ).trim();
       if (!text) {
         status.className = "support-status error";
         status.textContent = "Please write your follow-up message.";
