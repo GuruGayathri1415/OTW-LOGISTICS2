@@ -16,17 +16,20 @@
         ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[c],
     );
   const when = (v) => {
+    if (!v) return "";
     const d = new Date(v);
     return isNaN(d) ? String(v || "") : d.toLocaleString();
   };
   const badge = (s) => {
+    const st = String(s || "Open");
+    const lower = st.toLowerCase();
     const cls =
-      s === "Resolved" || s === "Closed"
+      lower === "resolved" || lower === "closed"
         ? "success"
-        : s === "Rejected"
+        : lower === "rejected"
           ? "danger"
           : "";
-    return `<span class="badge ${cls}">${esc(s)}</span>`;
+    return `<span class="badge ${cls}">${esc(st)}</span>`;
   };
 
   const state = {
@@ -130,15 +133,20 @@
     }
     const rows = state.tickets.length
       ? state.tickets
-          .map(
-            (t) => `<tr>
-              <td><b>${esc(t.ticketId)}</b></td>
-              <td>${esc(when(t.submittedAt))}</td>
+          .map((t) => {
+            const ticketCode = t.ticketId || t.ticket_no || t.ticket_id || t.id || "";
+            const submittedRaw =
+              t.submittedAt || t.submitted_at || t.createdAt || t.created_at || "";
+            const latestReply =
+              t.adminResponse || t.latestReply || t.latest_reply || "";
+            return `<tr>
+              <td><b>${esc(ticketCode)}</b></td>
+              <td>${esc(submittedRaw ? when(submittedRaw) : "")}</td>
               <td>${badge(t.status)}</td>
-              <td>${t.adminResponse ? esc(t.adminResponse.slice(0, 120)) : '<span class="muted">No reply yet</span>'}</td>
+              <td>${latestReply ? esc(String(latestReply).slice(0, 120)) : '<span class="muted">No reply yet</span>'}</td>
               <td><button class="secondary" type="button" data-track-open="${esc(t.id)}">View</button></td>
-            </tr>`,
-          )
+            </tr>`;
+          })
           .join("")
       : `<tr><td colspan="5" class="muted">You have not sent any support requests yet.</td></tr>`;
     root.innerHTML = `
@@ -173,29 +181,41 @@
 
   function paintDetail() {
     const { ticket: t, events } = state.open;
-    const history = events
+    const ticketCode = t.ticketId || t.ticket_no || t.ticket_id || t.id || "";
+    const submittedRaw =
+      t.submittedAt || t.submitted_at || t.createdAt || t.created_at || "";
+    const history = (events || [])
       .map((ev) => {
-        const who = ev.authorRole === "admin" ? "Support team" : ev.authorRole === "customer" ? "Customer" : "You";
+        const who =
+          ev.authorRole === "admin"
+            ? "Support team"
+            : ev.authorRole === "customer"
+              ? "Customer"
+              : "You";
         const label =
-          ev.kind === "submitted" ? "Request sent"
-          : ev.kind === "reply" ? "Reply from support"
-          : ev.kind === "customer_email" ? "Email from the customer"
-          : ev.kind === "followup" ? "Your follow-up"
-          : "Status changed to " + ev.status;
+          ev.kind === "submitted"
+            ? "Request sent"
+            : ev.kind === "reply"
+              ? "Reply from support"
+              : ev.kind === "customer_email"
+                ? "Email from the customer"
+                : ev.kind === "followup"
+                  ? "Your follow-up"
+                  : "Status changed to " + ev.status;
         return `<div class="support-event" style="margin:8px 0;padding:10px;border-radius:10px;background:rgba(0,0,0,.04)">
-          <div><b>${esc(label)}</b> · ${esc(who)} · <span class="muted">${esc(when(ev.createdAt))}</span></div>
+          <div><b>${esc(label)}</b> · ${esc(who)} · <span class="muted">${esc(when(ev.createdAt || ev.created_at))}</span></div>
           ${ev.body ? `<p style="margin:6px 0 0">${esc(ev.body)}</p>` : ""}</div>`;
       })
       .join("");
     root.innerHTML = `
-      <div class="panel-head"><div><h3>Ticket ${esc(t.ticketId)}</h3>
-      <p class="muted">Submitted ${esc(when(t.submittedAt))} · Status ${badge(t.status)}</p></div>
+      <div class="panel-head"><div><h3>Ticket ${esc(ticketCode)}</h3>
+      <p class="muted">Submitted ${esc(when(submittedRaw))} · Status ${badge(t.status)}</p></div>
       <button class="secondary" type="button" data-track-back>Back to my requests</button></div>
       <p><b>Problem:</b> ${esc(t.description)}</p>
       <div id="trackPhoto"><span class="muted">Loading photo…</span></div>
       <h4>Conversation</h4>
       ${history || '<p class="muted">No messages yet.</p>'}
-      ${t.status === "Closed" ? '<p class="muted">This ticket is closed. Please send a new request for a new issue.</p>' : `
+      ${String(t.status || "").toLowerCase() === "closed" ? '<p class="muted">This ticket is closed. Please send a new request for a new issue.</p>' : `
       <label style="display:block;margin-top:12px">Add a follow-up
         <textarea id="trackFollowUp" rows="3" maxlength="2000" placeholder="Add more details for our support team"></textarea></label>
       <div style="margin-top:8px"><button class="primary" type="button" data-track-send>Send follow-up</button></div>`}
@@ -204,14 +224,19 @@
 
   async function loadPhoto(id) {
     try {
-      const r = await fetch(base() + "/api/support/mine/" + encodeURIComponent(id) + "/photo", { credentials: "include" });
+      const r = await fetch(
+        base() + "/api/support/mine/" + encodeURIComponent(id) + "/photo",
+        { credentials: "include" },
+      );
       if (!r.ok) throw new Error("The photo could not be loaded.");
       state.photoUrl = URL.createObjectURL(await r.blob());
       const box = document.getElementById("trackPhoto");
-      if (box) box.innerHTML = `<img src="${state.photoUrl}" alt="Photo you attached" style="max-width:100%;border-radius:10px;margin:8px 0">`;
+      if (box)
+        box.innerHTML = `<img src="${state.photoUrl}" alt="Photo you attached" style="max-width:100%;border-radius:10px;margin:8px 0">`;
     } catch (e) {
       const box = document.getElementById("trackPhoto");
-      if (box) box.innerHTML = `<span class="support-status error">${esc(e.message)}</span>`;
+      if (box)
+        box.innerHTML = `<span class="support-status error">${esc(e.message)}</span>`;
     }
   }
 
@@ -234,10 +259,13 @@
       }
       send.disabled = true;
       try {
-        state.open = await call(`/api/support/mine/${encodeURIComponent(state.open.ticket.id)}/messages`, {
-          method: "POST",
-          body: { message: text },
-        });
+        state.open = await call(
+          `/api/support/mine/${encodeURIComponent(state.open.ticket.id)}/messages`,
+          {
+            method: "POST",
+            body: { message: text },
+          },
+        );
         paintDetail();
         loadPhoto(state.open.ticket.id);
       } catch (err) {
