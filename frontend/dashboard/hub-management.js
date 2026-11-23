@@ -262,7 +262,7 @@ function bindHubs() {
   $("#addHub").onclick = (e) => {
     e.preventDefault();
     resetHubForm();
-    scrollToAddHubSection("#hf-name");
+    scrollToAddHubSection("#hf-hiName");
   };
   $("#addNote").onclick = () => noteModal();
   $("#hubSearch").oninput = applyHubSearch;
