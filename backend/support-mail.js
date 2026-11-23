@@ -165,6 +165,9 @@ export async function createSupportMailer({
     const job = await rowOf(id);
     const at = iso();
     try {
+      if (!transport || typeof transport.sendMail !== "function") {
+        throw new Error("Mail transport is not configured.");
+      }
       const message = {
         to: job.to_addr,
         cc: job.cc_addr || undefined,
@@ -202,12 +205,9 @@ export async function createSupportMailer({
           "UPDATE support_email_jobs SET status='Sent', message_id=?, accepted=?, rejected='', last_error='', sent_at=?, updated_at=? WHERE id=?",
         )
         .run(info.messageId || "", accepted.join(", "), at, at, id);
-      // Link this email's Message-ID to the conversation entry it came from, so customer replies thread back.
       if (job.source_event_id && info.messageId)
         await db
-          .prepare(
-            "UPDATE support_ticket_events SET message_id=? WHERE id=?",
-          )
+          .prepare("UPDATE support_ticket_events SET message_id=? WHERE id=?")
           .run(info.messageId, job.source_event_id);
       await logAttempt(id, job.attempts, "Sent", info.messageId || "accepted");
       log.log?.(
@@ -231,7 +231,12 @@ export async function createSupportMailer({
           at,
           id,
         );
-      await logAttempt(id, row.attempts, gaveUp ? "Failed" : "Retrying", e.message);
+      await logAttempt(
+        id,
+        row.attempts,
+        gaveUp ? "Failed" : "Retrying",
+        e.message,
+      );
       log.error?.(
         `[support-email] ${job.kind} ${job.ticket_id} attempt ${row.attempts} failed: ${e.message}` +
           (gaveUp ? " (no more automatic attempts)" : `, retry at ${nextAt}`),
@@ -243,7 +248,6 @@ export async function createSupportMailer({
   // Sends every job that is due. Called on a timer and after each admin action.
   async function runDue(limit = 25) {
     const at = iso();
-    // A job left in Sending by a crash during a send is put back to Retrying.
     await db
       .prepare(
         "UPDATE support_email_jobs SET status='Retrying', next_attempt_at=? WHERE status='Sending' AND updated_at<?",
