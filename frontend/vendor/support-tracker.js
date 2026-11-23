@@ -13,26 +13,23 @@
     String(v).replace(
       /[&<>'"]/g,
       (c) =>
-        ({
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          "'": "&#39;",
-          '"': "&quot;",
-        })[c],
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[c],
     );
   const when = (v) => {
+    if (!v) return "";
     const d = new Date(v);
     return isNaN(d) ? String(v || "") : d.toLocaleString();
   };
   const badge = (s) => {
+    const st = String(s || "Open");
+    const lower = st.toLowerCase();
     const cls =
-      s === "Resolved" || s === "Closed"
+      lower === "resolved" || lower === "closed"
         ? "success"
-        : s === "Rejected"
+        : lower === "rejected"
           ? "danger"
           : "";
-    return `<span class="badge ${cls}">${esc(s)}</span>`;
+    return `<span class="badge ${cls}">${esc(st)}</span>`;
   };
 
   const state = {
@@ -49,8 +46,7 @@
     const retryHeader = r.headers.get("retry-after");
     if (retryHeader) {
       const secs = Number(retryHeader);
-      if (Number.isFinite(secs) && secs > 0)
-        return Math.min(secs * 1000, 10 * 60_000);
+      if (Number.isFinite(secs) && secs > 0) return Math.min(secs * 1000, 10 * 60_000);
       const parsedDate = Date.parse(retryHeader);
       if (!Number.isNaN(parsedDate) && parsedDate > Date.now()) {
         return Math.min(parsedDate - Date.now(), 10 * 60_000);
@@ -85,17 +81,13 @@
       err.retryAfterMs = waitMs;
       throw err;
     }
-    if (!r.ok)
-      throw new Error(out.error || "Request failed (" + r.status + ")");
+    if (!r.ok) throw new Error(out.error || "Request failed (" + r.status + ")");
     return out;
   }
 
   async function refresh({ manual = false } = {}) {
     if (!manual && Date.now() < state.rateLimitedUntil) {
-      const secsLeft = Math.max(
-        1,
-        Math.ceil((state.rateLimitedUntil - Date.now()) / 1000),
-      );
+      const secsLeft = Math.max(1, Math.ceil((state.rateLimitedUntil - Date.now()) / 1000));
       state.error = `Too many requests. Automatic refresh paused for ${secsLeft}s.`;
       paint();
       return;
@@ -141,15 +133,20 @@
     }
     const rows = state.tickets.length
       ? state.tickets
-          .map(
-            (t) => `<tr>
-              <td><b>${esc(t.ticketId)}</b></td>
-              <td>${esc(when(t.submittedAt))}</td>
+          .map((t) => {
+            const ticketCode = t.ticketId || t.ticket_no || t.ticket_id || t.id || "";
+            const submittedRaw =
+              t.submittedAt || t.submitted_at || t.createdAt || t.created_at || "";
+            const latestReply =
+              t.adminResponse || t.latestReply || t.latest_reply || "";
+            return `<tr>
+              <td><b>${esc(ticketCode)}</b></td>
+              <td>${esc(submittedRaw ? when(submittedRaw) : "")}</td>
               <td>${badge(t.status)}</td>
-              <td>${t.adminResponse ? esc(t.adminResponse.slice(0, 120)) : '<span class="muted">No reply yet</span>'}</td>
+              <td>${latestReply ? esc(String(latestReply).slice(0, 120)) : '<span class="muted">No reply yet</span>'}</td>
               <td><button class="secondary" type="button" data-track-open="${esc(t.id)}">View</button></td>
-            </tr>`,
-          )
+            </tr>`;
+          })
           .join("")
       : `<tr><td colspan="5" class="muted">You have not sent any support requests yet.</td></tr>`;
     root.innerHTML = `
@@ -184,7 +181,10 @@
 
   function paintDetail() {
     const { ticket: t, events } = state.open;
-    const history = events
+    const ticketCode = t.ticketId || t.ticket_no || t.ticket_id || t.id || "";
+    const submittedRaw =
+      t.submittedAt || t.submitted_at || t.createdAt || t.created_at || "";
+    const history = (events || [])
       .map((ev) => {
         const who =
           ev.authorRole === "admin"
@@ -203,26 +203,22 @@
                   ? "Your follow-up"
                   : "Status changed to " + ev.status;
         return `<div class="support-event" style="margin:8px 0;padding:10px;border-radius:10px;background:rgba(0,0,0,.04)">
-          <div><b>${esc(label)}</b> · ${esc(who)} · <span class="muted">${esc(when(ev.createdAt))}</span></div>
+          <div><b>${esc(label)}</b> · ${esc(who)} · <span class="muted">${esc(when(ev.createdAt || ev.created_at))}</span></div>
           ${ev.body ? `<p style="margin:6px 0 0">${esc(ev.body)}</p>` : ""}</div>`;
       })
       .join("");
     root.innerHTML = `
-      <div class="panel-head"><div><h3>Ticket ${esc(t.ticketId)}</h3>
-      <p class="muted">Submitted ${esc(when(t.submittedAt))} · Status ${badge(t.status)}</p></div>
+      <div class="panel-head"><div><h3>Ticket ${esc(ticketCode)}</h3>
+      <p class="muted">Submitted ${esc(when(submittedRaw))} · Status ${badge(t.status)}</p></div>
       <button class="secondary" type="button" data-track-back>Back to my requests</button></div>
       <p><b>Problem:</b> ${esc(t.description)}</p>
       <div id="trackPhoto"><span class="muted">Loading photo…</span></div>
       <h4>Conversation</h4>
       ${history || '<p class="muted">No messages yet.</p>'}
-      ${
-        t.status === "Closed"
-          ? '<p class="muted">This ticket is closed. Please send a new request for a new issue.</p>'
-          : `
+      ${String(t.status || "").toLowerCase() === "closed" ? '<p class="muted">This ticket is closed. Please send a new request for a new issue.</p>' : `
       <label style="display:block;margin-top:12px">Add a follow-up
         <textarea id="trackFollowUp" rows="3" maxlength="2000" placeholder="Add more details for our support team"></textarea></label>
-      <div style="margin-top:8px"><button class="primary" type="button" data-track-send>Send follow-up</button></div>`
-      }
+      <div style="margin-top:8px"><button class="primary" type="button" data-track-send>Send follow-up</button></div>`}
       <p class="support-status" id="trackStatus"></p>`;
   }
 
@@ -247,8 +243,7 @@
   root.addEventListener("click", async (e) => {
     const openBtn = e.target.closest("[data-track-open]");
     if (openBtn) return open(openBtn.dataset.trackOpen);
-    if (e.target.closest("[data-track-refresh]"))
-      return refresh({ manual: true });
+    if (e.target.closest("[data-track-refresh]")) return refresh({ manual: true });
     if (e.target.closest("[data-track-back]")) {
       state.open = null;
       return refresh({ manual: true });
@@ -256,9 +251,7 @@
     const send = e.target.closest("[data-track-send]");
     if (send) {
       const status = document.getElementById("trackStatus");
-      const text = (
-        document.getElementById("trackFollowUp")?.value || ""
-      ).trim();
+      const text = (document.getElementById("trackFollowUp")?.value || "").trim();
       if (!text) {
         status.className = "support-status error";
         status.textContent = "Please write your follow-up message.";
