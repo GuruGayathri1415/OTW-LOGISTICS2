@@ -20,7 +20,7 @@ function emailSentence(job) {
   if (!job) return "";
   if (job.status === "Sent") return "Our support team has been emailed about it.";
   if (job.status === "Failed")
-    return "The email alert to our team failed, so the team will look at your ticket in the portal.";
+    return "The email alert to our team could not be sent right now, but your ticket is saved and our team will view it in the portal.";
   return "The email alert is queued and will be retried automatically.";
 }
 
@@ -39,6 +39,19 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
     keyGenerator: (req) => `ip:${req.ip}`,
     message: {
       error: "You have sent several support requests in a short time. Please wait about ten minutes, then try again.",
+    },
+  });
+
+  // Generous read limiter for partner ticket refreshes & background polling
+  const mineLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skipFailedRequests: true,
+    keyGenerator: (req) => `support-mine:${req.ip}`,
+    message: {
+      error: "Too many refresh requests. Please wait a moment and try again.",
     },
   });
 
@@ -63,7 +76,7 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
     const list = typeof adminRecipients === "function" ? await adminRecipients() : adminRecipients || [];
     return list.filter(Boolean);
   };
-  const copyList = async () => (await admins()).filter((a) => a.toLowerCase() !== supportEmail.toLowerCase());
+  const copyList = async () => (await admins()).filter((a) => a.toLowerCase() !== String(supportEmail || "").toLowerCase());
 
   const lastMessageId = async (ticketId) => {
     if (typeof service.events !== "function") return "";
@@ -73,20 +86,29 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
   };
 
   async function notifyNewTicket(ticket) {
-    if (typeof inbound?.queueTicketEmails === "function") {
-      await inbound.queueTicketEmails(ticket);
-    }
-    const jobs = typeof mailer?.forTicket === "function" ? await mailer.forTicket(ticket.id) : [];
-    for (const j of jobs || []) {
-      if (j.status === "Pending" && typeof mailer?.attempt === "function") {
-        await mailer.attempt(j.id);
+    try {
+      if (typeof inbound?.queueTicketEmails === "function") {
+        await inbound.queueTicketEmails(ticket);
       }
+      const jobs = typeof mailer?.forTicket === "function" ? await mailer.forTicket(ticket.id) : [];
+      for (const j of jobs || []) {
+        if (j.status === "Pending" && typeof mailer?.attempt === "function") {
+          try {
+            await mailer.attempt(j.id);
+          } catch (mailErr) {
+            console.error("Support mail attempt failed:", mailErr && mailErr.message);
+          }
+        }
+      }
+      const nowJobs = typeof mailer?.forTicket === "function" ? await mailer.forTicket(ticket.id) : [];
+      return {
+        newTicket: (nowJobs || []).find((j) => j.kind === "new_ticket") || null,
+        confirmation: (nowJobs || []).find((j) => j.kind === "customer_confirmation") || null,
+      };
+    } catch (err) {
+      console.error("notifyNewTicket error:", err && err.message);
+      return { newTicket: null, confirmation: null };
     }
-    const nowJobs = typeof mailer?.forTicket === "function" ? await mailer.forTicket(ticket.id) : [];
-    return {
-      newTicket: (nowJobs || []).find((j) => j.kind === "new_ticket") || null,
-      confirmation: (nowJobs || []).find((j) => j.kind === "customer_confirmation") || null,
-    };
   }
 
   // ----- public submit (Vendor, Franchise, or not signed in) -----
@@ -160,7 +182,7 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
           ticketId: ticket.ticket_no,
           emailStatus: job ? job.status : "Not queued",
           emailSent: !!job && job.status === "Sent",
-          emailError: job && job.status !== "Sent" ? job.lastError : "",
+          emailError: job && job.status !== "Sent" ? job.lastError || "Email delivery failed" : "",
           customerEmailStatus: confirm ? confirm.status : "Not queued",
           adminCopy: ccCount > 0,
           message:
@@ -175,21 +197,21 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
   });
 
   // ----- partner (Vendor / Franchise) -----
-  app.get("/api/support/mine", partnerGuard, async (req, res) => {
+  app.get("/api/support/mine", mineLimiter, partnerGuard, async (req, res) => {
     try {
       res.json({ tickets: await service.listForAccount(req.partner) });
     } catch (e) {
       fail(res, e, "Support list failed:");
     }
   });
-  app.get("/api/support/mine/:id", partnerGuard, async (req, res) => {
+  app.get("/api/support/mine/:id", mineLimiter, partnerGuard, async (req, res) => {
     try {
       res.json(await service.getForAccount(req.params.id, req.partner));
     } catch (e) {
       fail(res, e, "Support ticket read failed:");
     }
   });
-  app.get("/api/support/mine/:id/photo", partnerGuard, async (req, res) => {
+  app.get("/api/support/mine/:id/photo", mineLimiter, partnerGuard, async (req, res) => {
     await sendPhoto(req, res, (id) => service.rowForAccount(id, req.partner));
   });
   app.post("/api/support/mine/:id/messages", partnerGuard, async (req, res) => {
@@ -197,20 +219,24 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
       const body = String(req.body?.message || "");
       const out = await service.partnerFollowUp(req.params.id, req.partner, body);
       const ticket = out.ticket;
-      const { job } = await mailer.enqueue({
-        ticketId: ticket.id,
-        dedupeKey: `followup:${out.eventId}`,
-        kind: "followup",
-        to: supportEmail,
-        cc: await copyList(),
-        subject: FOLLOWUP_SUBJECT(ticket.ticket_no),
-        body: followUpBody(
-          { ...ticket, ticket_no: ticket.ticket_no, customer_name: ticket.customer_name, portal_type: ticket.portal_type },
-          { author: req.partner.login_id, text: body.trim(), baseUrl },
-        ),
-        sourceEventId: null,
-      });
-      if (job?.id && typeof mailer.attempt === "function") await mailer.attempt(job.id);
+      try {
+        const { job } = await mailer.enqueue({
+          ticketId: ticket.id,
+          dedupeKey: `followup:${out.eventId}`,
+          kind: "followup",
+          to: supportEmail,
+          cc: await copyList(),
+          subject: FOLLOWUP_SUBJECT(ticket.ticket_no),
+          body: followUpBody(
+            { ...ticket, ticket_no: ticket.ticket_no, customer_name: ticket.customer_name, portal_type: ticket.portal_type },
+            { author: req.partner.login_id, text: body.trim(), baseUrl },
+          ),
+          sourceEventId: null,
+        });
+        if (job?.id && typeof mailer.attempt === "function") await mailer.attempt(job.id);
+      } catch (mailErr) {
+        console.error("Follow-up email failed:", mailErr && mailErr.message);
+      }
       res.json(out.detail);
     } catch (e) {
       fail(res, e, "Support follow-up failed:");
@@ -255,17 +281,22 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
       const actor = req.adminEmail || req.account.login_id;
       const out = await service.adminReply(req.params.id, actor, req.body?.message);
       const t = out.ticket;
-      const { job } = await mailer.enqueue({
-        ticketId: t.id,
-        dedupeKey: `reply:${out.eventId}`,
-        kind: "customer_reply",
-        to: t.email,
-        subject: REPLY_SUBJECT(t.ticket_no),
-        body: replyBody(t.ticket_no, String(req.body?.message || "").trim()),
-        inReplyTo: await lastMessageId(t.id),
-        sourceEventId: out.eventId,
-      });
-      const sent = job?.id && typeof mailer.attempt === "function" ? await mailer.attempt(job.id) : null;
+      let sent = null;
+      try {
+        const { job } = await mailer.enqueue({
+          ticketId: t.id,
+          dedupeKey: `reply:${out.eventId}`,
+          kind: "customer_reply",
+          to: t.email,
+          subject: REPLY_SUBJECT(t.ticket_no),
+          body: replyBody(t.ticket_no, String(req.body?.message || "").trim()),
+          inReplyTo: await lastMessageId(t.id),
+          sourceEventId: out.eventId,
+        });
+        if (job?.id && typeof mailer.attempt === "function") sent = await mailer.attempt(job.id);
+      } catch (mailErr) {
+        console.error("Support reply email failed:", mailErr && mailErr.message);
+      }
       const updated = await service.getForAdmin(t.id);
       const emailJobs = typeof mailer?.forTicket === "function" ? await mailer.forTicket(t.id) : [];
       res.json({ ...updated, emailJobs, replyEmail: sent });
