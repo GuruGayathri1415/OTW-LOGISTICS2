@@ -38,16 +38,17 @@ export function isValidLocation(value) {
 
 // The approved riders one partner registered (never pending, rejected or another partner's riders).
 // source is the registration source: 'Vendor' or 'Franchise'.
-export function listApprovedRidersFor(db, accountId, source) {
+export async function listApprovedRidersFor(db, accountId, source) {
   if (!accountId) return [];
-  return db
+  const rows = await db
     .prepare(
-      `SELECT rider_id AS riderId, rider_name AS riderName, hub_location AS hubLocation
+      `SELECT rider_id AS "riderId", rider_name AS "riderName", hub_location AS "hubLocation"
     FROM rider_registrations
     WHERE owner_account_id = ? AND registration_source = ? AND application_status = 'APPROVED'
-    ORDER BY rider_name COLLATE NOCASE`,
+    ORDER BY LOWER(rider_name) ASC, rider_id ASC`,
     )
     .all(accountId, source);
+  return Array.isArray(rows) ? rows : [];
 }
 export const listApprovedRidersForVendor = (db, accountId) =>
   listApprovedRidersFor(db, accountId, "Vendor");
@@ -57,7 +58,7 @@ export const listApprovedRidersForFranchise = (db, accountId) =>
 // One row per rider per period. The same rider and period sent twice is counted once.
 function uniqueRows(records) {
   const seen = new Map();
-  for (const r of records) {
+  for (const r of Array.isArray(records) ? records : []) {
     const rider = normalizeRiderKey(r.riderId);
     if (!rider) continue;
     const period =
@@ -119,9 +120,10 @@ function latestPeriod(rows) {
 // week: optional period to show (its start..end key, or its Week label). Empty = the newest weekly cycle.
 export function buildPartnerReport(records, riders, { week = "" } = {}) {
   const rows = uniqueRows(records);
+  const riderList = Array.isArray(riders) ? riders : [];
   const riderKeys = new Set();
   const locations = new Set();
-  for (const r of riders) {
+  for (const r of riderList) {
     const key = normalizeRiderKey(r.riderId);
     if (!key) continue;
     riderKeys.add(key);
@@ -200,16 +202,19 @@ export function buildPartnerReport(records, riders, { week = "" } = {}) {
 
 // Used by the Portal weekly-payments endpoint: the same rows the Orders page gets, plus the report built from them.
 // role 'vendor' or 'franchise'; each partner only ever gets its own riders' rows (see weekly-payments.js).
-export function partnerPortalPayload(db, role, accountId, week = "") {
+export async function partnerPortalPayload(db, role, accountId, week = "") {
   const isVendor = role === "vendor";
-  const records = isVendor
-    ? listForVendor(db, accountId)
-    : listForFranchise(db, accountId);
-  const riders = listApprovedRidersFor(
-    db,
-    accountId,
-    isVendor ? "Vendor" : "Franchise",
-  );
+  const [rawRecords, riders] = await Promise.all([
+    isVendor
+      ? listForVendor(db, accountId)
+      : listForFranchise(db, accountId),
+    listApprovedRidersFor(
+      db,
+      accountId,
+      isVendor ? "Vendor" : "Franchise",
+    ),
+  ]);
+  const records = Array.isArray(rawRecords) ? rawRecords : [];
   return { records, report: buildPartnerReport(records, riders, { week }) };
 }
 export const vendorPortalPayload = (db, accountId, week = "") =>
