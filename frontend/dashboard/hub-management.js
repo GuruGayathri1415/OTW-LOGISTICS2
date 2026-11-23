@@ -222,7 +222,7 @@ function hubMapQuery(h) {
     .join(", ");
 }
 
-function scrollToAddHubSection(focusSelector = "#hf-name") {
+function scrollToAddHubSection(focusSelector = "#hf-hiName") {
   const section =
     document.getElementById("addHubSection") ||
     document.querySelector(".hub-form-card");
