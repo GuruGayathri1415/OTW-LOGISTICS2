@@ -42,7 +42,22 @@ function toBackendSupportStatus(value) {
   return STATUS_TO_BACKEND[key] || key;
 }
 
-function normalizeSupportTicket(t = {}) {
+function extractPhoneFromDescription(desc = "") {
+  const m = String(desc || "").match(/\bContact Phone:\s*([+\d][\d\s\-()]{5,20})/i);
+  return m ? m[1].trim() : "";
+}
+
+function hasTicketPhoto(t = {}, attachments = []) {
+  if (t.hasPhoto === true || t.has_photo === true) return true;
+  if (Array.isArray(attachments) && attachments.length > 0) return true;
+  if (Array.isArray(t.attachments) && t.attachments.length > 0) return true;
+  if (typeof t.photo === "string" && t.photo.trim()) return true;
+  if (t.photo && typeof t.photo === "object") return true;
+  if (t.photoName || t.photo_name || t.photoUrl || t.photo_url) return true;
+  return false;
+}
+
+function normalizeSupportTicket(t = {}, attachments = []) {
   const ticketId = t.ticketId || t.ticket_no || t.ticket_code || t.id || "";
   const portalType =
     t.portalType || t.portal_type || t.requester_role || "Email";
@@ -52,8 +67,19 @@ function normalizeSupportTicket(t = {}) {
     t.submittedAt || t.submitted_at || t.createdAt || t.created_at || "";
   const accountLogin =
     t.accountLogin || t.account_login || t.requester_id || "";
-  const phone = t.phone || t.contactNumber || t.mobile || "";
   const description = t.description || t.subject || "";
+  const phone =
+    t.phone ||
+    t.contactNumber ||
+    t.mobile ||
+    extractPhoneFromDescription(description) ||
+    "";
+  const atts = Array.isArray(attachments) && attachments.length
+    ? attachments
+    : Array.isArray(t.attachments)
+      ? t.attachments
+      : [];
+  const hasPhoto = hasTicketPhoto(t, atts);
 
   return {
     ...t,
@@ -64,6 +90,8 @@ function normalizeSupportTicket(t = {}) {
     accountLogin,
     phone,
     description,
+    attachments: atts,
+    hasPhoto,
   };
 }
 
@@ -189,7 +217,7 @@ async function supLoad() {
     if (supStore.portal) qs.set("portal", supStore.portal);
     if (supStore.q.trim()) qs.set("q", supStore.q.trim());
     const out = await supRequest("/tickets?" + qs.toString());
-    supStore.tickets = (out.tickets || []).map(normalizeSupportTicket);
+    supStore.tickets = (out.tickets || []).map((t) => normalizeSupportTicket(t));
     supStore.summary = out.summary || null;
     supStore.error = "";
   } catch (e) {
@@ -272,7 +300,7 @@ function supPaint() {
             <td>${esc(t.email)}</td>
             <td>${esc(t.phone) || "—"}</td>
             <td style="max-width:260px">${shortText(t.description)}</td>
-            <td>${t.photo ? `<button class="link-btn" data-sup-open="${esc(t.id)}">View photo</button>` : '<span class="muted">None</span>'}</td>
+            <td>${t.hasPhoto ? `<button class="link-btn" data-sup-open="${esc(t.id)}">View photo</button>` : '<span class="muted">None</span>'}</td>
             <td>${esc(fmtDate(t.submittedAt))}</td>
             <td>${badgeFor(t.status)}${t.awaitingReply ? `<br><span class="badge warning" title="${esc(fmtDate(t.lastCustomerMessageAt))}">New customer email</span>` : ""}</td>
             <td>${emailCell}</td>
@@ -294,7 +322,10 @@ async function supOpen(id, focusReply = false) {
 }
 
 function supRenderModal(focusReply) {
-  const t = normalizeSupportTicket(supStore.open.ticket || {});
+  const attachments = Array.isArray(supStore.open?.attachments)
+    ? supStore.open.attachments
+    : [];
+  const t = normalizeSupportTicket(supStore.open.ticket || {}, attachments);
   const events = (supStore.open.events || []).map(normalizeSupportEvent);
   const emailJobs = supStore.open.emailJobs || [];
   const who = (ev) =>
@@ -354,7 +385,7 @@ function supRenderModal(focusReply) {
       <h4>Problem description</h4>
       <p class="sup-desc" style="white-space:pre-wrap">${esc(t.description)}</p>
       <h4>Photo</h4>
-      <div id="supPhoto">${t.photo ? '<span class="muted">Loading photo…</span>' : '<span class="muted">No photo was attached.</span>'}</div>
+      <div id="supPhoto">${t.hasPhoto ? '<span class="muted">Loading photo…</span>' : '<span class="muted">No photo was attached.</span>'}</div>
       <h4>Communication history</h4>
       <div class="sup-history">${history}</div>
       <h4>Emails for this ticket</h4>
@@ -371,7 +402,7 @@ function supRenderModal(focusReply) {
       </div>
       <p class="support-status" id="supModalStatus"></p>
     </div>`);
-  if (t.photo) supLoadPhoto(t.id);
+  if (t.hasPhoto) supLoadPhoto(t.id);
   if (focusReply) setTimeout(() => $("#supReplyText")?.focus(), 0);
   bindSupportModal();
 }
