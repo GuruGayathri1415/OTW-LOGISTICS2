@@ -2,8 +2,8 @@
 //
 // A rider is registered once (Rider ID, name, mobile number, hub pincode, hub location, a selfie / screenshot
 // and an Aadhaar card) by the Admin, a Vendor or a Franchise. Every registration starts as PENDING.
-// Decisions (APPROVED / REJECTED, with remarks):
-//   - an admin can decide on any registration;
+// Decisions (APPROVED / REJECTED / BANNED, with remarks):
+//   - an admin can decide on any registration and delete REJECTED registrations;
 //   - a vendor can decide only on the riders it registered;
 //   - a franchise cannot decide on anything (it sees the status and the admin's remarks only).
 //
@@ -14,7 +14,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-export const REG_STATUSES = ["PENDING", "APPROVED", "REJECTED"];
+export const REG_STATUSES = ["PENDING", "APPROVED", "REJECTED", "BANNED"];
 export const REG_MAX_FILE_BYTES = 5 * 1024 * 1024;
 export const REG_PORTALS = ["admin", "vendor", "franchise"];
 export const REG_DECIDER_ROLES = ["admin", "vendor"];
@@ -43,6 +43,7 @@ const DEFAULT_BUCKET = "rider-registrations";
 export class RegistrationError extends Error {
   constructor(status, message, field = "") {
     super(message);
+    this.name = "RegistrationError";
     this.status = status;
     this.field = field;
   }
@@ -427,7 +428,7 @@ export async function createRiderRegistrationService({
       updated_at TEXT NOT NULL
     );
     CREATE UNIQUE INDEX IF NOT EXISTS rider_registrations_live_rider
-      ON rider_registrations(rider_key) WHERE application_status <> 'REJECTED';
+      ON rider_registrations(rider_key) WHERE application_status NOT IN ('REJECTED', 'BANNED');
     CREATE INDEX IF NOT EXISTS rider_registrations_owner ON rider_registrations(owner_account_id, registration_source);
     CREATE TABLE IF NOT EXISTS rider_registration_history(
       id BIGSERIAL PRIMARY KEY,
@@ -464,7 +465,7 @@ export async function createRiderRegistrationService({
   const statements = {
     byId: db.prepare("SELECT * FROM rider_registrations WHERE id = ?"),
     liveByRider: db.prepare(
-      "SELECT id, application_id FROM rider_registrations WHERE rider_key = ? AND application_status <> 'REJECTED' AND id <> ?",
+      "SELECT id, application_id FROM rider_registrations WHERE rider_key = ? AND application_status NOT IN ('REJECTED', 'BANNED') AND id <> ?",
     ),
     insertHistory:
       db.prepare(`INSERT INTO rider_registration_history(registration_id, from_status, to_status, remarks, actor, actor_role, created_at)
@@ -514,6 +515,7 @@ export async function createRiderRegistrationService({
   }
 
   function toPublic(row, history = null) {
+    const status = String(row.application_status || "PENDING").toUpperCase();
     const out = {
       id: row.id,
       applicationId: row.application_id,
@@ -537,7 +539,8 @@ export async function createRiderRegistrationService({
       ownerLoginId: row.owner_login_id || "",
       ownerName: row.owner_name || "",
       createdBy: row.created_by,
-      status: row.application_status,
+      status,
+      banned: status === "BANNED",
       rejectionRemarks: row.rejection_remarks || "",
       decisionRemarks: row.decision_remarks || "",
       approvedBy: row.approved_by || "",
@@ -616,7 +619,7 @@ export async function createRiderRegistrationService({
       await runTx(async (tx) => {
         const clash = await tx
           .prepare(
-            "SELECT id, application_id FROM rider_registrations WHERE rider_key = ? AND application_status <> 'REJECTED' AND id <> ?",
+            "SELECT id, application_id FROM rider_registrations WHERE rider_key = ? AND application_status NOT IN ('REJECTED', 'BANNED') AND id <> ?",
           )
           .get(fields.riderKey, "");
         if (clash) throw duplicateError(fields, clash);
@@ -779,7 +782,7 @@ export async function createRiderRegistrationService({
       await runTx(async (tx) => {
         const latestClash = await tx
           .prepare(
-            "SELECT id, application_id FROM rider_registrations WHERE rider_key = ? AND application_status <> 'REJECTED' AND id <> ?",
+            "SELECT id, application_id FROM rider_registrations WHERE rider_key = ? AND application_status NOT IN ('REJECTED', 'BANNED') AND id <> ?",
           )
           .get(fields.riderKey, row.id);
         if (latestClash)
@@ -838,7 +841,7 @@ export async function createRiderRegistrationService({
     if (!REG_DECIDER_ROLES.includes(actor.role)) {
       throw new RegistrationError(
         403,
-        "Only the On The Way Logistics admin can approve or reject rider applications.",
+        "Only the On The Way Logistics admin can approve, reject or ban rider applications.",
       );
     }
     const target = String(input.status ?? "")
@@ -847,7 +850,7 @@ export async function createRiderRegistrationService({
     if (!REG_STATUSES.includes(target))
       throw new RegistrationError(
         400,
-        "Status must be PENDING, APPROVED or REJECTED.",
+        "Status must be PENDING, APPROVED, REJECTED or BANNED.",
         "status",
       );
     const remarks = String(input.remarks ?? "")
@@ -859,30 +862,53 @@ export async function createRiderRegistrationService({
         "Enter the reason for rejecting this application.",
         "remarks",
       );
+    if (target === "BANNED" && !remarks)
+      throw new RegistrationError(
+        400,
+        "Enter the reason for banning this rider.",
+        "remarks",
+      );
     const row = await visibleRow(actor, id);
     if (!row) throw new RegistrationError(404, "Rider application not found.");
-    if (row.application_status === target)
+    const currentStatus = String(row.application_status || "PENDING").toUpperCase();
+    if (currentStatus === target)
       throw new RegistrationError(
         400,
         `This application is already ${target}.`,
       );
+    if (currentStatus === "APPROVED" && target === "REJECTED") {
+      throw new RegistrationError(
+        400,
+        "Approved rider applications cannot be rejected. Use Ban instead.",
+        "status",
+      );
+    }
     const identity = String(actor.identity || actor.role);
     const stamp = now();
     await runTx(async (tx) => {
-      if (target !== "REJECTED") {
+      if (target === "APPROVED") {
         const clash = await tx
           .prepare(
-            "SELECT id, application_id FROM rider_registrations WHERE rider_key = ? AND application_status <> 'REJECTED' AND id <> ?",
+            "SELECT id, application_id FROM rider_registrations WHERE rider_key = ? AND application_status NOT IN ('REJECTED', 'BANNED') AND id <> ?",
           )
           .get(row.rider_key, row.id);
         if (clash) {
           throw new RegistrationError(
             409,
-            `Rider ID ${row.rider_id} already has a live application (${clash.application_id}). Reject that one first.`,
+            `Rider ID ${row.rider_id} already has a live application (${clash.application_id}). Reject or ban that one first.`,
             "status",
           );
         }
       }
+      const approvedBy =
+        target === "APPROVED"
+          ? row.approved_by || identity
+          : row.approved_by || null;
+      const approvalDate =
+        target === "APPROVED"
+          ? row.approval_date || stamp
+          : row.approval_date || null;
+
       await tx
         .prepare(
           `UPDATE rider_registrations SET application_status = ?, rejection_remarks = ?, decision_remarks = ?,
@@ -891,9 +917,9 @@ export async function createRiderRegistrationService({
         .run(
           target,
           target === "REJECTED" ? remarks : null,
-          target === "PENDING" ? null : remarks || null,
-          target === "APPROVED" ? identity : null,
-          target === "APPROVED" ? stamp : null,
+          target === "PENDING" ? null : remarks || row.decision_remarks || null,
+          approvedBy,
+          approvalDate,
           stamp,
           row.id,
         );
@@ -904,7 +930,7 @@ export async function createRiderRegistrationService({
         )
         .run(
           row.id,
-          row.application_status,
+          currentStatus,
           target,
           remarks || null,
           identity,
@@ -915,10 +941,48 @@ export async function createRiderRegistrationService({
     await audit(identity, "rider_registration_" + target.toLowerCase(), {
       applicationId: row.application_id,
       riderId: row.rider_id,
-      from: row.application_status,
+      from: currentStatus,
       remarks: remarks || "",
     });
     return get(actor, row.id);
+  }
+
+  async function remove(actor, id) {
+    assertActor(actor);
+    if (actor.role !== "admin") {
+      throw new RegistrationError(
+        403,
+        "Only the admin can delete rejected rider applications.",
+      );
+    }
+    const row = await visibleRow(actor, id);
+    if (!row) throw new RegistrationError(404, "Rider application not found.");
+    const status = String(row.application_status || "PENDING").toUpperCase();
+    if (status !== "REJECTED") {
+      throw new RegistrationError(
+        400,
+        "Only rejected rider applications can be deleted.",
+      );
+    }
+
+    await runTx(async (tx) => {
+      await tx
+        .prepare(
+          "DELETE FROM rider_registration_history WHERE registration_id = ?",
+        )
+        .run(row.id);
+      await tx
+        .prepare("DELETE FROM rider_registrations WHERE id = ?")
+        .run(row.id);
+    });
+
+    await storage.removePrefix(path.posix.join("registrations", row.id));
+    await audit(String(actor.identity || actor.role), "rider_registration_deleted", {
+      applicationId: row.application_id,
+      riderId: row.rider_id,
+      from: status,
+    });
+    return { ok: true, id: row.id };
   }
 
   async function fileFor(actor, id, kind) {
@@ -952,5 +1016,5 @@ export async function createRiderRegistrationService({
     };
   }
 
-  return { list, get, create, update, setStatus, fileFor };
+  return { list, get, create, update, setStatus, remove, fileFor };
 }

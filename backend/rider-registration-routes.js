@@ -1,7 +1,8 @@
 // HTTP routes for rider applications (see rider-registrations.js for the rules).
 // Every request names the portal it comes from with ?portal=admin|vendor|franchise and must be signed in to it.
 // Admins see everything; vendors and franchises see only the riders they registered themselves.
-// Only admins and vendors can approve or reject (a franchise submits and watches the status).
+// Only admins and vendors can approve, reject or ban (a franchise submits and watches the status).
+// Only admins can delete rejected rider registrations.
 import multer from "multer";
 import fs from "node:fs";
 import {
@@ -174,6 +175,20 @@ export function registerRiderRegistrationRoutes(
       }
     } catch (err) {
       fail(res, err, "Could not change the application status:");
+    }
+  });
+
+  app.delete("/api/rider-registrations/:id", guard, async (req, res) => {
+    if (req.actor.role !== "admin") {
+      return res.status(403).json({
+        error: "Only the admin can delete rejected rider registrations.",
+      });
+    }
+    try {
+      const out = await service.remove(req.actor, req.params.id);
+      res.json(out);
+    } catch (err) {
+      fail(res, err, "Could not delete the rider registration:");
     }
   });
 

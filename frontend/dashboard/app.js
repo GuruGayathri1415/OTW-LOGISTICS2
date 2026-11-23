@@ -540,7 +540,8 @@ if (resetToken) {
   })();
 }
 
-if ($("#menuBtn")) $("#menuBtn").onclick = () => $("#sidebar")?.classList.toggle("open");
+if ($("#menuBtn"))
+  $("#menuBtn").onclick = () => $("#sidebar")?.classList.toggle("open");
 $$(".nav").forEach(
   (n) =>
     (n.onclick = () => {
@@ -568,7 +569,8 @@ function render(page) {
     payments: payments,
     whatsapp: whatsapp,
     partners: partners,
-    notifications: typeof notificationsPage === "function" ? notificationsPage : null,
+    notifications:
+      typeof notificationsPage === "function" ? notificationsPage : null,
     reports: reports,
     settings: settings,
   };
@@ -595,7 +597,8 @@ function render(page) {
   if (page === "whatsapp") bindWhatsApp();
   if (page === "partners") bindPartners();
   if (page === "settings") bindSettings();
-  if (page === "notifications" && typeof bindNotifications === "function") bindNotifications();
+  if (page === "notifications" && typeof bindNotifications === "function")
+    bindNotifications();
   if (page === "reports") bindReports();
   if (typeof updatePartnerNavCount === "function") updatePartnerNavCount();
   if (supportAlertOpenCount > 0)
@@ -777,8 +780,12 @@ function bindDashboard() {
     syncPartnerApplications();
     await Promise.all([
       loadWeeklyPayments(),
-      typeof rrLoad === "function" ? rrLoad({ quiet: true }) : Promise.resolve(),
-      typeof loadHubs === "function" ? loadHubs({ quiet: true }) : Promise.resolve(true),
+      typeof rrLoad === "function"
+        ? rrLoad({ quiet: true })
+        : Promise.resolve(),
+      typeof loadHubs === "function"
+        ? loadHubs({ quiet: true })
+        : Promise.resolve(true),
       checkSupportTicketsAlert({ notifyOnIncrease: false }),
     ]);
     if (currentPage === "dashboard") render("dashboard");
@@ -984,7 +991,9 @@ async function syncRiderMasterDirectory() {
         });
         const updatedReg = rrExtractItem(out);
         if (updatedReg)
-          rrItems = rrItemsArray().map((x) => (x.id === reg.id ? updatedReg : x));
+          rrItems = rrItemsArray().map((x) =>
+            x.id === reg.id ? updatedReg : x,
+          );
         remoteChanged++;
       }
     } catch (e) {
@@ -1147,7 +1156,7 @@ window.deleteRider = (id) => {
   const r = db.riders.find((x) => x.id === id);
   const registered = r && r.registrationId;
   const question = registered
-    ? "This rider is an approved Rider Registration. Removing them here only hides them from this list in this browser. To remove them for every admin, reject the application in Client > Client Members.\n\nHide this rider here?"
+    ? "This rider is an approved Rider Registration. Removing them here only hides them from this list in this browser. To remove them for every admin, ban or manage the application in Client > Client Members.\n\nHide this rider here?"
     : "Delete this rider?";
   if (confirm(question)) {
     if (registered) {
@@ -1174,7 +1183,9 @@ window.viewRider = async (id) => {
     weekly = [];
   try {
     await Promise.all([
-      typeof rrLoad === "function" ? rrLoad({ quiet: true }) : Promise.resolve(),
+      typeof rrLoad === "function"
+        ? rrLoad({ quiet: true })
+        : Promise.resolve(),
       loadAdminDocs(),
     ]);
     registration =
@@ -1293,7 +1304,9 @@ function docsOfRider(r) {
       id: d.id,
       type: d.type,
       file: d.name,
-      date: d.createdAt ? new Date(d.createdAt).toLocaleDateString("en-IN") : "",
+      date: d.createdAt
+        ? new Date(d.createdAt).toLocaleDateString("en-IN")
+        : "",
       server: true,
     }));
   const legacy = (db.documents || [])
@@ -1364,7 +1377,8 @@ function documentsListHtml() {
   return secs
     .map(({ r, docs }) => {
       const reg = regs.find(
-        (x) => x && normalizeRiderLinkId(x.riderId) === normalizeRiderLinkId(r.id),
+        (x) =>
+          x && normalizeRiderLinkId(x.riderId) === normalizeRiderLinkId(r.id),
       );
       const extra = reg
         ? `<div class="uploaded-doc"><span><b>Rider Selfie / Screenshot</b> • ${esc(reg.selfie?.name || "Secure file")}</span><button class="btn-sm" data-reg-doc="selfie" data-reg-id="${esc(reg.id)}" data-reg-name="${esc(r.name)}">View</button></div><div class="uploaded-doc"><span><b>Aadhaar Card</b> • ${esc(reg.aadhaar?.name || "Secure file")}</span><button class="btn-sm" data-reg-doc="aadhaar" data-reg-id="${esc(reg.id)}" data-reg-name="${esc(r.name)}">Preview</button></div>`
@@ -2226,7 +2240,7 @@ function client() {
  <div class="card hidden" id="partnerRidersCard"></div>
  <div class="card" id="regMembersCard"><div class="section-head"><div><h3>Client Members — Rider Registrations</h3><p class="muted">Every rider registered by Admin, Franchise or Vendor appears here. New registrations start as PENDING.</p></div><div class="actions"><button class="ghost" id="regRefresh" type="button">↻ Refresh</button></div></div>
  <div class="cards"><div class="stat"><div class="label">Total</div><div class="value" id="regStatTotal">0</div></div><div class="stat"><div class="label">Pending</div><div class="value" id="regStatPending">0</div></div><div class="stat"><div class="label">Approved</div><div class="value" id="regStatApproved">0</div></div><div class="stat"><div class="label">Rejected</div><div class="value" id="regStatRejected">0</div></div></div>
- <div class="rr-filters"><input class="search" id="regFilterId" placeholder="Filter by Rider ID" autocomplete="off"><input class="search" id="regFilterName" placeholder="Filter by Rider Name" autocomplete="off"><input class="search" id="regFilterHub" placeholder="Filter by Hub Location" autocomplete="off"><select class="status-filter" id="regFilterStatus" aria-label="Filter by application status"><option value="">All statuses</option><option value="PENDING">Pending</option><option value="APPROVED">Approved</option><option value="REJECTED">Rejected</option></select></div>
+ <div class="rr-filters"><input class="search" id="regFilterId" placeholder="Filter by Rider ID" autocomplete="off"><input class="search" id="regFilterName" placeholder="Filter by Rider Name" autocomplete="off"><input class="search" id="regFilterHub" placeholder="Filter by Hub Location" autocomplete="off"><select class="status-filter" id="regFilterStatus" aria-label="Filter by application status"><option value="">All statuses</option><option value="PENDING">Pending</option><option value="APPROVED">Approved</option><option value="BANNED">Banned</option><option value="REJECTED">Rejected</option></select></div>
  <div class="table-wrap"><table class="table reg-table"><thead><tr><th>Rider ID</th><th>Rider Name</th><th>Mobile Number</th><th>Hub Pincode</th><th>Hub Location</th><th>Selfie</th><th>Aadhaar</th><th>Applied By</th><th>Application Date</th><th>Status</th><th>Action</th></tr></thead><tbody id="regRows"></tbody></table></div>
  <p id="regEmpty" class="empty hidden"></p></div>`;
 }
@@ -2424,6 +2438,7 @@ const RIDER_STATUS_CLASS = {
   APPROVED: "success",
   PENDING: "warning",
   REJECTED: "danger",
+  BANNED: "danger",
 };
 const prMoney = (n) =>
   "₹" +
@@ -4184,6 +4199,7 @@ const RR_STATUS_CLASS = {
   PENDING: "warning",
   APPROVED: "success",
   REJECTED: "danger",
+  BANNED: "danger",
 };
 const RR_FORM_FIELD = {
   riderId: "rrId",
@@ -4197,10 +4213,15 @@ const RR_FORM_FIELD = {
 function rrApiUrl(path = "") {
   return PARTNER_API_BASE + "/api/rider-registrations" + path + "?portal=admin";
 }
+function rrIsBanned(r) {
+  const status = String(r?.status || "").toUpperCase();
+  return status === "BANNED" || !!(r?.banned || r?.isBanned);
+}
 function rrExtractItem(out) {
   if (!out || typeof out !== "object") return null;
   const candidate = out.item || out.registration || out.data || null;
   if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+    const status = String(candidate.status || "PENDING").toUpperCase();
     return {
       ...candidate,
       id: candidate.id || candidate._id || "",
@@ -4214,7 +4235,8 @@ function rrExtractItem(out) {
         "",
       hubPincode: candidate.hubPincode || candidate.hub_pincode || "",
       hubLocation: candidate.hubLocation || candidate.hub_location || "",
-      status: String(candidate.status || "PENDING").toUpperCase(),
+      status,
+      banned: status === "BANNED" || !!(candidate.banned || candidate.isBanned),
       createdAt: candidate.createdAt || candidate.created_at || "",
     };
   }
@@ -4327,7 +4349,7 @@ function syncRegisteredRiders() {
       if (
         r &&
         r.registrationId === reg.id &&
-        reg.status === "REJECTED" &&
+        (reg.status === "REJECTED" || reg.status === "BANNED") &&
         r.status !== "Inactive"
       ) {
         r.status = "Inactive";
@@ -4466,9 +4488,18 @@ function rrRender() {
   const f = rrFilters();
   const list = items.filter(
     (r) =>
-      (!f.id || String(r.riderId || "").toLowerCase().includes(f.id)) &&
-      (!f.name || String(r.riderName || "").toLowerCase().includes(f.name)) &&
-      (!f.hub || String(r.hubLocation || "").toLowerCase().includes(f.hub)) &&
+      (!f.id ||
+        String(r.riderId || "")
+          .toLowerCase()
+          .includes(f.id)) &&
+      (!f.name ||
+        String(r.riderName || "")
+          .toLowerCase()
+          .includes(f.name)) &&
+      (!f.hub ||
+        String(r.hubLocation || "")
+          .toLowerCase()
+          .includes(f.hub)) &&
       (!f.status || r.status === f.status),
   );
   body.innerHTML = list.map(rrRow).join("");
@@ -4482,23 +4513,37 @@ function rrRender() {
 }
 function rrRow(r) {
   if (!r || !r.id) return "";
-  const id = esc(r.id),
-    acts = [
-      `<button type="button" class="btn-sm" data-rr-act="view" data-rr-id="${id}">View</button>`,
-    ];
-  if (r.status !== "APPROVED")
+  const id = esc(r.id);
+  const status = String(r.status || "PENDING").toUpperCase();
+  const banned = rrIsBanned(r);
+  const displayStatus = banned ? "BANNED" : status;
+  const acts = [
+    `<button type="button" class="btn-sm" data-rr-act="view" data-rr-id="${id}">View</button>`,
+  ];
+
+  if (status === "PENDING") {
     acts.push(
       `<button type="button" class="btn-sm accept" data-rr-act="APPROVED" data-rr-id="${id}">✓ Approve</button>`,
-    );
-  if (r.status !== "REJECTED")
-    acts.push(
       `<button type="button" class="btn-sm danger" data-rr-act="REJECTED" data-rr-id="${id}">✕ Reject</button>`,
     );
+  } else if (status === "APPROVED" || banned) {
+    acts.push(
+      banned
+        ? `<button type="button" class="btn-sm accept" data-rr-act="UNBAN" data-rr-id="${id}">✓ Unban</button>`
+        : `<button type="button" class="btn-sm danger" data-rr-act="BAN" data-rr-id="${id}">🚫 Ban</button>`,
+    );
+  } else if (status === "REJECTED") {
+    acts.push(
+      `<button type="button" class="btn-sm accept" data-rr-act="APPROVED" data-rr-id="${id}">✓ Approve</button>`,
+      `<button type="button" class="btn-sm danger" data-rr-act="DELETE" data-rr-id="${id}">🗑 Delete</button>`,
+    );
+  }
+
   return (
     `<tr><td><b>${esc(r.riderId || "—")}</b><br><small class="muted">${esc(r.applicationId || "")}</small></td><td>${esc(r.riderName || "—")}</td><td>${esc(r.mobileNumber || "—")}</td><td>${esc(r.hubPincode || "—")}</td><td>${esc(r.hubLocation || "—")}</td>` +
     `<td><button type="button" class="btn-sm" data-rr-doc="selfie" data-rr-id="${id}" data-rr-title="Selfie">View selfie</button></td>` +
     `<td><button type="button" class="btn-sm" data-rr-doc="aadhaar" data-rr-id="${id}" data-rr-title="Aadhaar">Preview Aadhaar</button></td>` +
-    `<td>${esc(r.appliedBy || "—")}${r.ownerLoginId ? `<br><small class="muted">${esc(r.ownerLoginId)}${r.ownerName ? "<br>" + esc(r.ownerName) : ""}</small>` : ""}</td><td>${esc(rrDate(r.createdAt))}</td><td>${rrStatusBadge(r.status || "PENDING")}</td><td><div class="mini-actions">${acts.join("")}</div></td></tr>`
+    `<td>${esc(r.appliedBy || "—")}${r.ownerLoginId ? `<br><small class="muted">${esc(r.ownerLoginId)}${r.ownerName ? "<br>" + esc(r.ownerName) : ""}</small>` : ""}</td><td>${esc(rrDate(r.createdAt))}</td><td>${rrStatusBadge(displayStatus)}</td><td><div class="mini-actions">${acts.join("")}</div></td></tr>`
   );
 }
 function rrBindClientPage() {
@@ -4538,8 +4583,12 @@ function rrTableClick(e) {
       b.dataset.rrDoc,
       `${b.dataset.rrTitle} · ${item.riderName || item.riderId} (${item.riderId || item.id})`,
     );
-  if (b.dataset.rrAct === "view") return rrViewDetail(item.id);
-  rrConfirmDecision(item, b.dataset.rrAct);
+  const act = b.dataset.rrAct;
+  if (act === "view") return rrViewDetail(item.id);
+  if (act === "BAN" || act === "UNBAN")
+    return rrConfirmBan(item, act === "BAN");
+  if (act === "DELETE") return rrConfirmDelete(item);
+  rrConfirmDecision(item, act);
 }
 function rrRevokeDocument() {
   if (rrObjectUrl) {
@@ -4579,6 +4628,86 @@ window.rrCloseDocument = () => {
   rrRevokeDocument();
   closeModal();
 };
+function rrConfirmBan(item, ban = true) {
+  openModal(`<h3>${ban ? "Ban" : "Unban"} approved rider?</h3>
+    <p>${ban ? "Ban" : "Unban"} <b>${esc(item.riderName)}</b> (Rider ID <b>${esc(item.riderId)}</b>, application ${esc(item.applicationId)})?</p>
+    <div class="field span2"><label for="rrBanRemarks">${ban ? "Reason for ban *" : "Remarks (optional)"}</label><textarea id="rrBanRemarks" rows="3" maxlength="500" placeholder="${ban ? "e.g. Policy violation or inactive account" : "e.g. Issue resolved"}"></textarea></div>
+    <p id="rrDecisionError" class="form-message error" role="alert"></p>
+    <div class="modal-actions"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="button" id="rrConfirm" class="primary ${ban ? "danger-fill" : "accept-fill"}">${ban ? "🚫 Ban Rider" : "✓ Unban Rider"}</button></div>`);
+  $("#rrBanRemarks")?.focus();
+  $("#rrConfirm").onclick = async () => {
+    const remarks = $("#rrBanRemarks").value.trim();
+    if (ban && !remarks) {
+      $("#rrDecisionError").textContent =
+        "Enter the reason for banning this rider.";
+      return;
+    }
+    const btn = $("#rrConfirm");
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    try {
+      const nextStatus = ban ? "BANNED" : "APPROVED";
+      const out = await rrCall(
+        rrApiUrl("/" + encodeURIComponent(item.id) + "/status"),
+        { method: "POST", body: { status: nextStatus, remarks } },
+      );
+      const updatedItem = rrExtractItem(out) ||
+        out.item || {
+          ...item,
+          status: nextStatus,
+          banned: ban,
+        };
+      rrItems = rrItemsArray().map((x) => (x.id === item.id ? updatedItem : x));
+      closeModal();
+      rrRender();
+      if (!syncRegisteredRiders() && currentPage === "riders") paintRiders();
+      toast(
+        `${item.riderName} (${item.riderId}) ${ban ? "banned" : "unbanned"}`,
+      );
+    } catch (e) {
+      $("#rrDecisionError").textContent = e.message;
+      btn.disabled = false;
+      btn.textContent = ban ? "🚫 Ban Rider" : "✓ Unban Rider";
+      toast("Could not update ban status: " + e.message);
+    }
+  };
+}
+function rrConfirmDelete(item) {
+  openModal(`<h3>Delete rejected rider application?</h3>
+    <p>Permanently delete <b>${esc(item.riderName)}</b> (Rider ID <b>${esc(item.riderId)}</b>, application ${esc(item.applicationId)})? This removes the rejected application and its uploaded documents.</p>
+    <p id="rrDecisionError" class="form-message error" role="alert"></p>
+    <div class="modal-actions"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="button" id="rrConfirm" class="primary danger-fill">🗑 Delete Permanently</button></div>`);
+  $("#rrConfirm").onclick = async () => {
+    const btn = $("#rrConfirm");
+    btn.disabled = true;
+    btn.textContent = "Deleting…";
+    try {
+      await rrCall(rrApiUrl("/" + encodeURIComponent(item.id)), {
+        method: "DELETE",
+      });
+      rrItems = rrItemsArray().filter((x) => x.id !== item.id);
+      if (Array.isArray(db.hiddenRegistrations)) {
+        db.hiddenRegistrations = db.hiddenRegistrations.filter(
+          (id) => id !== item.id,
+        );
+      }
+      db.riders = db.riders.filter(
+        (r) =>
+          r.registrationId !== item.id && String(r.id) !== String(item.riderId),
+      );
+      save();
+      closeModal();
+      rrRender();
+      if (currentPage === "riders") paintRiders();
+      toast(`${item.applicationId} deleted`);
+    } catch (e) {
+      $("#rrDecisionError").textContent = e.message;
+      btn.disabled = false;
+      btn.textContent = "🗑 Delete Permanently";
+      toast("Could not delete registration: " + e.message);
+    }
+  };
+}
 function rrConfirmDecision(item, status) {
   const approve = status === "APPROVED";
   openModal(`<h3>${approve ? "Approve" : "Reject"} rider application?</h3>
@@ -4603,9 +4732,7 @@ function rrConfirmDecision(item, status) {
         { method: "POST", body: { status, remarks } },
       );
       const updatedItem = rrExtractItem(out) || out.item;
-      rrItems = rrItemsArray().map((x) =>
-        x.id === item.id ? updatedItem : x,
-      );
+      rrItems = rrItemsArray().map((x) => (x.id === item.id ? updatedItem : x));
       closeModal();
       rrRender();
       if (!syncRegisteredRiders() && currentPage === "riders") paintRiders();
@@ -4623,28 +4750,44 @@ async function rrViewDetail(id) {
     const out = await rrCall(rrApiUrl("/" + encodeURIComponent(id)));
     const r = rrExtractItem(out) || out.item;
     rrItems = rrItemsArray().map((x) => (x.id === r.id ? r : x));
+    const status = String(r.status || "PENDING").toUpperCase();
+    const banned = rrIsBanned(r);
     const history = (r.history || [])
       .map(
         (h) =>
           `<tr><td>${esc(rrDate(h.at))}</td><td>${esc(h.fromStatus ? h.fromStatus + " → " : "")}${esc(h.toStatus)}</td><td>${esc(h.actor)}</td><td>${esc(h.remarks || "—")}</td></tr>`,
       )
       .join("");
+    let modalActions = `<button type="button" class="ghost" onclick="closeModal()">Close</button>`;
+    if (status === "PENDING") {
+      modalActions +=
+        `<button type="button" class="primary accept-fill" data-rr-decide="APPROVED">✓ Approve</button>` +
+        `<button type="button" class="primary danger-fill" data-rr-decide="REJECTED">✕ Reject</button>`;
+    } else if (status === "APPROVED" || banned) {
+      modalActions += banned
+        ? `<button type="button" class="primary accept-fill" data-rr-ban="UNBAN">✓ Unban</button>`
+        : `<button type="button" class="primary danger-fill" data-rr-ban="BAN">🚫 Ban</button>`;
+    } else if (status === "REJECTED") {
+      modalActions +=
+        `<button type="button" class="primary accept-fill" data-rr-decide="APPROVED">✓ Approve</button>` +
+        `<button type="button" class="primary danger-fill" data-rr-delete="1">🗑 Delete</button>`;
+    }
     openModal(`<h3>${esc(r.riderName)} · ${esc(r.riderId)}</h3>
       <div class="grid2">
         <div><b>Application ID</b><p>${esc(r.applicationId)}</p></div>
-        <div><b>Status</b><p>${rrStatusBadge(r.status)}</p></div>
+        <div><b>Status</b><p>${rrStatusBadge(banned ? "BANNED" : status)}</p></div>
         <div><b>Mobile number</b><p>${esc(r.mobileNumber)}</p></div>
         <div><b>Hub pincode</b><p>${esc(r.hubPincode)}</p></div>
         <div><b>Hub location</b><p>${esc(r.hubLocation)}</p></div>
         <div><b>Applied by</b><p>${esc(r.appliedBy)}${r.ownerLoginId ? " · " + esc(r.ownerLoginId) + (r.ownerName ? " · " + esc(r.ownerName) : "") : ""}</p></div>
         <div><b>Application date</b><p>${esc(rrDate(r.createdAt))}</p></div>
         <div><b>Approved by</b><p>${esc(r.approvedBy || "—")}${r.approvalDate ? " · " + esc(rrDate(r.approvalDate)) : ""}</p></div>
-        ${r.decisionRemarks ? `<div class="span2"><b>${r.status === "REJECTED" ? "Rejection reason" : "Approval remarks"}</b><p>${esc(r.decisionRemarks)}</p></div>` : ""}
+        ${r.decisionRemarks ? `<div class="span2"><b>${status === "REJECTED" ? "Rejection reason" : status === "BANNED" ? "Ban reason" : "Approval remarks"}</b><p>${esc(r.decisionRemarks)}</p></div>` : ""}
       </div>
       <div class="rr-doc-buttons"><button type="button" class="btn-sm" data-rr-doc="selfie" data-rr-title="Selfie · ${esc(r.riderName)}">View selfie</button><button type="button" class="btn-sm" data-rr-doc="aadhaar" data-rr-title="Aadhaar · ${esc(r.riderName)}">Preview Aadhaar</button></div>
       <h4>History</h4>
       <div class="table-wrap"><table class="table"><thead><tr><th>When</th><th>Change</th><th>By</th><th>Remarks</th></tr></thead><tbody>${history || '<tr><td colspan="4" class="empty">No history.</td></tr>'}</tbody></table></div>
-      <div class="modal-actions"><button type="button" class="ghost" onclick="closeModal()">Close</button>${r.status !== "APPROVED" ? '<button type="button" class="primary accept-fill" data-rr-decide="APPROVED">✓ Approve</button>' : ""}${r.status !== "REJECTED" ? '<button type="button" class="primary danger-fill" data-rr-decide="REJECTED">✕ Reject</button>' : ""}</div>`);
+      <div class="modal-actions">${modalActions}</div>`);
     $("#modalBody")
       .querySelectorAll("[data-rr-doc]")
       .forEach(
@@ -4657,6 +4800,14 @@ async function rrViewDetail(id) {
       .forEach(
         (b) => (b.onclick = () => rrConfirmDecision(r, b.dataset.rrDecide)),
       );
+    $("#modalBody")
+      .querySelectorAll("[data-rr-ban]")
+      .forEach(
+        (b) => (b.onclick = () => rrConfirmBan(r, b.dataset.rrBan === "BAN")),
+      );
+    $("#modalBody")
+      .querySelectorAll("[data-rr-delete]")
+      .forEach((b) => (b.onclick = () => rrConfirmDelete(r)));
   } catch (e) {
     toast(e.message);
   }
