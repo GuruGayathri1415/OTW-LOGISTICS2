@@ -82,16 +82,11 @@ const moneyOrZero = (v) =>
     : Number(v);
 // Category amounts keep a missing value as NULL (shown as —), so a blank is never confused with a real ₹0.
 
-// Rider matching against Rider Registration (live applications only). Exact ID + name is preferred;
-// a unique normalized name may correct a stale/missing Excel ID. Ambiguous or unmatched rows are
-// stored with a stable provisional key and sent to Admin verification; they are never treated as approved.
 export function resolveRiders(
   records,
   registrations,
   savedMappings = new Map(),
 ) {
-  // Rider ID is the only key that can connect an Excel row to a rider. Rider Name is never used to find a rider,
-  // so a name that matches several riders (or one rider with a different ID) cannot move records between riders.
   const byKey = new Map();
   for (const g of registrations) {
     if (g.rider_key && !byKey.has(g.rider_key)) byKey.set(g.rider_key, g);
@@ -104,7 +99,6 @@ export function resolveRiders(
     const nameKey = normalizeRiderName(r.riderName);
     const label = `${r.riderName || "Unnamed"} (${r.weekLabel || "no week"})`;
     if (r.mappedRiderId) {
-      // an Admin chose this approved rider for this pending row
       const mapped = byKey.get(normalizeRiderKey(r.mappedRiderId));
       if (mapped) {
         out.push({
@@ -123,7 +117,6 @@ export function resolveRiders(
       });
       return;
     }
-    // A saved Admin mapping is an explicit decision for this Excel rider and is still honoured.
     const savedId = savedMappings.get(nameKey + "|" + sheetId);
     if (savedId) {
       const mapped = byKey.get(normalizeRiderKey(savedId));
@@ -139,7 +132,6 @@ export function resolveRiders(
     }
     const reg = sheetId ? byKey.get(sheetId) : null;
     if (!reg) {
-      // Not an approved rider with this Rider ID (missing, unregistered, pending or rejected). Kept pending for Admin; never assigned.
       review.push({
         row: i + 1,
         record: r,
@@ -149,7 +141,6 @@ export function resolveRiders(
       return;
     }
     if (normalizeRiderName(reg.rider_name) !== nameKey) {
-      // The ID decides the match. The name in the sheet differs from the registration, so the registered name is shown and the difference is reported.
       corrections.push({
         row: i + 1,
         rider: r.riderName,
@@ -172,8 +163,6 @@ export async function createWeeklyPaymentService({
   db,
   audit = async () => {},
   riderRegistry = false,
-  // Called after rows were added or changed (import, Admin mapping, re-check after a rider approval):
-  // ({importId, fileName, inserted, updated}). Used by the server to notify the partners concerned.
   onSaved = null,
 }) {
   await db.exec(`CREATE TABLE IF NOT EXISTS weekly_payments(
@@ -210,7 +199,6 @@ export async function createWeeklyPaymentService({
     weeks TEXT NOT NULL DEFAULT '[]'
   );`);
 
-  // Rows that could not be verified against Rider Registration. They are kept here for Admin review, not discarded.
   await db.exec(`CREATE TABLE IF NOT EXISTS weekly_payment_pending(
     id BIGSERIAL PRIMARY KEY,
     pending_key TEXT NOT NULL UNIQUE,
@@ -228,7 +216,7 @@ export async function createWeeklyPaymentService({
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`);
-  // Explicit Admin mappings persist across later imports, so a rider mapped once is not mapped again.
+
   await db.exec(`CREATE TABLE IF NOT EXISTS weekly_payment_rider_mappings(
     mapping_key TEXT PRIMARY KEY,
     excel_rider_id TEXT NOT NULL DEFAULT '',
@@ -237,6 +225,7 @@ export async function createWeeklyPaymentService({
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`);
+
   await db.exec(`CREATE TABLE IF NOT EXISTS weekly_payment_provisional_riders(
     mapping_key TEXT PRIMARY KEY,
     excel_rider_id TEXT NOT NULL DEFAULT '',
@@ -257,8 +246,6 @@ export async function createWeeklyPaymentService({
     .all();
   const existingColumns = new Set(colRows.map((c) => c.name));
 
-  // Payment status (PENDING / PROCESSING / PAID / FAILED) is set only by the Admin. Excel imports never write this
-  // column, so a re-import keeps the status already saved for each rider-week.
   if (!existingColumns.has("payment_status"))
     await db.exec(
       "ALTER TABLE weekly_payments ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'PENDING'",
@@ -274,29 +261,17 @@ export async function createWeeklyPaymentService({
     ["rate_prime", "REAL"],
     ["rate_club", "REAL"],
     ["rate_sdd", "REAL"],
+    ["payment_ref", "TEXT NOT NULL DEFAULT ''"],
+    ["adjustment_reason", "TEXT NOT NULL DEFAULT ''"],
   ]) {
     if (!existingColumns.has(name))
       await db.exec(`ALTER TABLE weekly_payments ADD COLUMN ${name} ${type}`);
   }
 
-  const selectOne = db.prepare(
-    "SELECT * FROM weekly_payments WHERE rider_key = ? AND week_key = ?",
-  );
-  const selectByName = db.prepare(
+  const selectByNameAll = db.prepare(
     "SELECT * FROM weekly_payments WHERE week_key = ? AND name_key = ?",
   );
-  const selectByNameAll = selectByName;
-  const insertRow = db.prepare(
-    `INSERT INTO weekly_payments(${COLUMNS.join(",")},import_id,created_at,updated_at) VALUES(${COLUMNS.map(() => "?").join(",")},?,?,?)`,
-  );
-  const updateRow = db.prepare(
-    `UPDATE weekly_payments SET name_key = ?, ${VALUE_COLUMNS.map((c) => c + " = ?").join(", ")}, import_id = ?, updated_at = ? WHERE id = ?`,
-  );
-  const insertImport = db.prepare(
-    "INSERT INTO weekly_payment_imports(id,file_name,file_hash,imported_at,imported_by,total,inserted,updated,unchanged,amount_total,weeks) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-  );
 
-  // One record from the browser -> the values to store, or a message saying what is wrong with it.
   function normalise(r, i, fileName) {
     const riderName = clean(r?.riderName),
       riderKey = clean(r?.riderKey),
@@ -383,8 +358,6 @@ export async function createWeeklyPaymentService({
   }
 
   const same = (row, values) => {
-    // values order = VALUE_COLUMNS: label, dates, rider, IDs, daily totals, category counts/amounts, total amount, source metadata, rates.
-    // Source metadata (file, sheet, row, original cells) is not compared, so re-importing the same figures is "unchanged".
     const cur = [
       row.week_label,
       row.week_start,
@@ -421,7 +394,7 @@ export async function createWeeklyPaymentService({
         .all();
     } catch {
       return [];
-    } // the registration table does not exist yet: no rider can be verified
+    }
   }
 
   const mappingKeyOf = (r) =>
@@ -441,18 +414,6 @@ export async function createWeeklyPaymentService({
     "|" +
     normalizeRiderKey(r.riderId);
 
-  const upsertPending = db.prepare(
-    `INSERT INTO weekly_payment_pending(pending_key, excel_rider_id, rider_name, week_key, week_label, week_start, week_end, payload, reason, file_name, status, mapped_rider_id, created_at, updated_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING','',?,?)
-     ON CONFLICT(pending_key) DO UPDATE SET payload = excluded.payload, reason = excluded.reason, file_name = excluded.file_name, status = 'PENDING', updated_at = excluded.updated_at`,
-  );
-  const setPendingReason = db.prepare(
-    "UPDATE weekly_payment_pending SET reason = ?, updated_at = ? WHERE id = ?",
-  );
-  const setPendingImported = db.prepare(
-    "UPDATE weekly_payment_pending SET status = 'IMPORTED', mapped_rider_id = ?, reason = 'Imported', updated_at = ? WHERE id = ?",
-  );
-
   async function pendingRows(executor = db) {
     return executor
       .prepare(
@@ -461,8 +422,6 @@ export async function createWeeklyPaymentService({
       .all();
   }
 
-  // The one import path. Verified rows are saved; unverified rows are kept as pending; pending rows are re-checked
-  // against the current registrations and imported when they now verify. Nothing is rejected as a whole.
   async function applyRecords(
     records,
     { fileName, fileHash, actor, recordImport = true },
@@ -514,7 +473,6 @@ export async function createWeeklyPaymentService({
         ...provisionalRows,
       ];
       corrections = resolved.corrections;
-      // count each rider-week once: a pending row that the same file also provides is not counted twice
       const keyOf = (r) => normalizeRiderKey(r.riderId) + "|" + r.weekKey;
       const fileKeys = new Set(
         resolved.records.filter((r) => !isPending(r)).map(keyOf),
@@ -539,7 +497,6 @@ export async function createWeeklyPaymentService({
           (errors.length > 5 ? ` (and ${errors.length - 5} more)` : ""),
       );
 
-    // the same rider and week sent twice in one request is counted once
     const unique = new Map();
     prepared.forEach((p) => unique.set(p.riderKey + "\u0000" + p.weekKey, p));
 
@@ -602,8 +559,6 @@ export async function createWeeklyPaymentService({
         "INSERT INTO weekly_payment_imports(id,file_name,file_hash,imported_at,imported_by,total,inserted,updated,unchanged,amount_total,weeks) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
       );
 
-      // When an Admin maps a pending rider, remove that rider's provisional weekly keys before
-      // saving under the permanent registered Rider ID. This prevents two rows for the same week.
       for (const r of pendingResolved) {
         const sourcePending = await tx
           .prepare(
@@ -625,7 +580,7 @@ export async function createWeeklyPaymentService({
       for (const p of unique.values()) {
         let row = await txSelectOne.get(p.riderKey, p.weekKey);
         if (row && touched.has(row.id)) row = null;
-        if (row && !p.values[4]) p.values[4] = row.rider_id; // never blank out a Rider ID that is already saved
+        if (row && !p.values[4]) p.values[4] = row.rider_id;
         if (!row) {
           await txInsertRow.run(
             p.riderKey,
@@ -789,7 +744,6 @@ export async function createWeeklyPaymentService({
     return applyRecords(records, { fileName, fileHash, actor });
   }
 
-  // Lists the rows waiting for Admin review, with the registrations to choose from.
   async function listPending() {
     const regs = (await liveRegistrations())
       .slice()
@@ -872,7 +826,6 @@ export async function createWeeklyPaymentService({
     };
   }
 
-  // Admin chooses the registered rider for one pending row. The choice is recorded, then the pending rows are imported.
   async function mapPending(id, riderId, actor = "") {
     const row = await db
       .prepare("SELECT * FROM weekly_payment_pending WHERE id = ?")
@@ -891,7 +844,6 @@ export async function createWeeklyPaymentService({
         400,
         "Choose a rider that is in Rider Registration and has APPROVED status. Pending applications cannot receive payment records.",
       );
-    // One mapping resolves every weekly row for this same Excel rider, not just the selected week.
     const allPend = await pendingRows();
     const rows = allPend.filter(
       (p) =>
@@ -946,7 +898,6 @@ export async function createWeeklyPaymentService({
     };
   }
 
-  // Weekly (7 days) or 15-day cycle, from the saved period dates. Must match cycleOf in dashboard/payment-excel.js.
   const cycleOf = (start, end) =>
     start &&
     end &&
@@ -985,6 +936,8 @@ export async function createWeeklyPaymentService({
     sddAmount: r.sdd_amount,
     amount: r.amount,
     amountRaw: r.amount_raw,
+    paymentRef: r.payment_ref || "",
+    adjustmentReason: r.adjustment_reason || "",
     sourceFile: r.source_file,
     sheet: r.sheet,
     rowNumber: r.row_number,
@@ -994,7 +947,6 @@ export async function createWeeklyPaymentService({
       : "PENDING",
   });
 
-  // q matches the rider name, the Rider ID or the week (as written in the sheet, or as 2026-10-26).
   async function list({ q = "" } = {}) {
     const term = clean(q).toLowerCase();
     let rows;
@@ -1037,8 +989,6 @@ export async function createWeeklyPaymentService({
     };
   }
 
-  // Admin sets the payment status of one saved rider-week. Only payment_status changes: amounts, Rider ID, week and
-  // the import history are left exactly as saved, and no row is deleted.
   async function setPaymentStatus(id, status, actor = "") {
     const next = String(status ?? "")
       .trim()
@@ -1087,7 +1037,228 @@ export async function createWeeklyPaymentService({
     };
   }
 
-  // Run after an Admin approves a rider: pending Excel rows with that Rider ID are imported now, not at the next upload.
+  // Updates orders, amounts, and payment details on an existing weekly payment row or creates a manual adjustment row.
+  async function applyManualAdjustment(input = {}, actor = "") {
+    const riderName = clean(input.riderName ?? input.rider);
+    if (!riderName) {
+      throw new WeeklyPaymentError(400, "Rider Name is required.");
+    }
+    const rawAmount = input.amount ?? input.totalAmount;
+    const amount = num(rawAmount);
+    if (amount === null) {
+      throw new WeeklyPaymentError(400, "Enter a valid Total Amount.");
+    }
+
+    const riderId = clean(input.riderId);
+    const weekLabel = clean(input.week ?? input.weekLabel);
+    const weekStart = clean(input.weekStart);
+    const weekEnd = clean(input.weekEnd);
+    if (
+      (weekStart && !ISO.test(weekStart)) ||
+      (weekEnd && !ISO.test(weekEnd))
+    ) {
+      throw new WeeklyPaymentError(400, "The week dates are not valid.");
+    }
+
+    const days = num(input.days);
+    const lm = num(input.lm);
+    const primaryOrders = num(input.primary ?? input.primaryOrders);
+    const club = num(input.club);
+    const sdd = num(input.sdd);
+    const totalOrders =
+      num(input.totalOrders) ??
+      ((lm ?? 0) + (primaryOrders ?? 0) + (club ?? 0) + (sdd ?? 0) || null);
+
+    const lmAmount = num(input.lmAmount);
+    const primeAmount = num(input.primeAmount);
+    const clubAmount = num(input.clubAmount);
+    const sddAmount = num(input.sddAmount);
+    const amountRaw = clean(input.amountRaw) || `₹${Number(amount).toFixed(2)}`;
+
+    const statusCandidate = String(input.paymentStatus ?? "PENDING")
+      .trim()
+      .toUpperCase();
+    const paymentStatus = PAYMENT_STATUSES.includes(statusCandidate)
+      ? statusCandidate
+      : "PENDING";
+    const paymentRef = clean(input.paymentRef ?? input.utr).slice(0, 120);
+    const adjustmentReason = clean(
+      input.reason ?? input.adjustmentReason,
+    ).slice(0, 500);
+    const stamp = new Date().toISOString();
+
+    const recordId = input.recordId ?? input.id;
+    if (
+      recordId !== undefined &&
+      recordId !== null &&
+      String(recordId).trim() !== ""
+    ) {
+      const existing = await db
+        .prepare("SELECT * FROM weekly_payments WHERE id = ?")
+        .get(Number(recordId));
+      if (!existing) {
+        throw new WeeklyPaymentError(404, "Weekly payment record not found.");
+      }
+
+      const nextRiderId = riderId || existing.rider_id || "";
+      const nextRiderKey = nextRiderId
+        ? "id:" + normalizeRiderKey(nextRiderId)
+        : existing.rider_key;
+      const nextWeekLabel = weekLabel || existing.week_label || "";
+
+      await db
+        .prepare(
+          `UPDATE weekly_payments
+           SET rider_key = ?,
+               name_key = ?,
+               rider_id = ?,
+               rider_name = ?,
+               week_label = ?,
+               week_start = ?,
+               week_end = ?,
+               days = ?,
+               total_orders = ?,
+               lm = ?,
+               primary_orders = ?,
+               club = ?,
+               sdd = ?,
+               lm_amount = ?,
+               prime_amount = ?,
+               club_amount = ?,
+               sdd_amount = ?,
+               amount = ?,
+               amount_raw = ?,
+               payment_status = ?,
+               payment_ref = ?,
+               adjustment_reason = ?,
+               updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          nextRiderKey,
+          nameKeyOf(riderName),
+          nextRiderId,
+          riderName,
+          nextWeekLabel,
+          weekStart || existing.week_start || "",
+          weekEnd || existing.week_end || "",
+          days,
+          totalOrders,
+          lm,
+          primaryOrders,
+          club,
+          sdd,
+          lmAmount,
+          primeAmount,
+          clubAmount,
+          sddAmount,
+          amount,
+          amountRaw,
+          paymentStatus,
+          paymentRef,
+          adjustmentReason,
+          stamp,
+          existing.id,
+        );
+
+      await audit(actor, "weekly_payment_manual_adjustment", {
+        id: existing.id,
+        riderId: nextRiderId,
+        rider: riderName,
+        totalOrders,
+        amount,
+        paymentStatus,
+        paymentRef,
+      });
+
+      const updated = await db
+        .prepare("SELECT * FROM weekly_payments WHERE id = ?")
+        .get(existing.id);
+      return { record: updated ? shape(updated) : null };
+    }
+
+    const effectiveRiderKey = riderId
+      ? "id:" + normalizeRiderKey(riderId)
+      : provisionalKeyFor(riderName, "");
+    const effectiveWeekKey =
+      clean(input.weekKey) ||
+      (weekStart && weekEnd
+        ? `${weekStart}..${weekEnd}`
+        : `manual:${crypto.randomUUID().slice(0, 8)}`);
+
+    const existingManual = await db
+      .prepare(
+        "SELECT * FROM weekly_payments WHERE rider_key = ? AND week_key = ?",
+      )
+      .get(effectiveRiderKey, effectiveWeekKey);
+
+    if (existingManual) {
+      return applyManualAdjustment(
+        { ...input, id: existingManual.id, recordId: existingManual.id },
+        actor,
+      );
+    }
+
+    await db
+      .prepare(
+        `INSERT INTO weekly_payments(
+          rider_key, week_key, name_key, week_label, week_start, week_end,
+          rider_name, rider_id, days, total_orders, lm, primary_orders, club, sdd,
+          lm_amount, prime_amount, club_amount, sdd_amount, amount, amount_raw,
+          source_file, sheet, row_number, original, import_id,
+          payment_status, payment_ref, adjustment_reason, created_at, updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        effectiveRiderKey,
+        effectiveWeekKey,
+        nameKeyOf(riderName),
+        weekLabel || "Manual Adjustment",
+        weekStart,
+        weekEnd,
+        riderName,
+        riderId,
+        days,
+        totalOrders,
+        lm,
+        primaryOrders,
+        club,
+        sdd,
+        lmAmount,
+        primeAmount,
+        clubAmount,
+        sddAmount,
+        amount,
+        amountRaw,
+        "Manual Adjustment",
+        "",
+        null,
+        "{}",
+        "manual",
+        paymentStatus,
+        paymentRef,
+        adjustmentReason,
+        stamp,
+        stamp,
+      );
+
+    await audit(actor, "weekly_payment_manual_adjustment_created", {
+      riderId,
+      rider: riderName,
+      totalOrders,
+      amount,
+      paymentStatus,
+      paymentRef,
+    });
+
+    const created = await db
+      .prepare(
+        "SELECT * FROM weekly_payments WHERE rider_key = ? AND week_key = ?",
+      )
+      .get(effectiveRiderKey, effectiveWeekKey);
+    return { record: created ? shape(created) : null };
+  }
+
   async function recheckPending(actor = "") {
     if (!(await pendingRows()).length)
       return { pendingVerified: 0, inserted: 0, updated: 0 };
@@ -1111,12 +1282,10 @@ export async function createWeeklyPaymentService({
     mapPending,
     recheckPending,
     setPaymentStatus,
+    applyManualAdjustment,
   };
 }
 
-// The rows one franchise may see: weekly records whose Rider ID is an APPROVED Franchise registration owned by this
-// account. Matching uses the Rider ID only; the displayed name is the registered name. Provisional (unverified) rows
-// are never included. Enforced here on the server, not in the browser.
 export async function listForFranchise(db, accountId) {
   if (!accountId) return [];
   return db
@@ -1137,9 +1306,6 @@ export async function listForFranchise(db, accountId) {
     .all(accountId);
 }
 
-// The rows one vendor may see: weekly records whose Rider ID is an APPROVED rider that this vendor registered
-// (registration_source = Vendor and owner_account_id = this vendor's account). Matching uses the Rider ID only.
-// Pending, rejected, provisional and other vendors' riders are never included.
 export async function listForVendor(db, accountId) {
   if (!accountId) return [];
   return db
@@ -1160,9 +1326,6 @@ export async function listForVendor(db, accountId) {
     .all(accountId);
 }
 
-// The partners whose riders received rows in one import (or Admin mapping / re-check): one entry per vendor or
-// franchise account, with the number of rows and riders. Same visibility rules as listForVendor / listForFranchise:
-// only APPROVED registrations owned by an active account of the matching role, never provisional rows.
 export async function partnerGroupsForImport(db, importId) {
   if (!importId) return [];
   return db

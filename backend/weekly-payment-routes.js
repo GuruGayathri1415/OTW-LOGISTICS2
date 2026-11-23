@@ -72,6 +72,23 @@ export function registerWeeklyPaymentRoutes(app, { guard, service }) {
     }
   });
 
+  // Admin updates orders, amounts, and payment details on an existing row or creates a manual adjustment.
+  app.post(
+    "/api/admin/weekly-payments/adjustments",
+    guard,
+    async (req, res) => {
+      try {
+        const result = await service.applyManualAdjustment(
+          req.body || {},
+          req.adminEmail || "",
+        );
+        res.json({ ok: true, result });
+      } catch (err) {
+        fail(res, err, "Could not save the manual adjustment:");
+      }
+    },
+  );
+
   // Saves the rows read from an Excel sheet: {fileName, fileHash, records:[...]}. Safe to send twice (no duplicates).
   app.post("/api/admin/weekly-payments/import", guard, async (req, res) => {
     try {

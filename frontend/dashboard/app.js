@@ -3670,7 +3670,10 @@ async function loadWeeklyPayments() {
   const before = weeklyStore.signature || "";
   try {
     const out = await weeklyRequest("");
-    weeklyStore.rows = out.records || [];
+    const list = Array.isArray(out)
+      ? out
+      : out.records || out.items || out.rows || out.data || [];
+    weeklyStore.rows = Array.isArray(list) ? list : [];
     weeklyStore.lastImport = out.lastImport || weeklyStore.lastImport;
     weeklyStore.loaded = true;
   } catch (e) {
@@ -3901,15 +3904,346 @@ function openWeeklyRiderDetails(index) {
       `${item("Total Orders", cnt(p.totalOrders))}${item("LM Orders", cnt(p.lm))}${item("Prime Orders", cnt(p.primary))}${item("Club Orders", cnt(p.club))}${item("SDD Orders", cnt(p.sdd))}` +
       `${item("LM Rate", rate(p.lmRate))}${item("Prime Rate", rate(p.primeRate))}${item("Club Rate", rate(p.clubRate))}${item("SDD Rate", rate(p.sddRate))}` +
       `${item("LM Amount", amt(p.lmAmount))}${item("Prime Amount", amt(p.primeAmount))}${item("Club Amount", amt(p.clubAmount))}${item("SDD Amount", amt(p.sddAmount))}` +
-      `${item("Total Amount (from Excel)", amt(p.amount))}${item("Source file", esc(p.sourceFile || (p.manual ? "Manual adjustment" : "—")))}` +
+      `${item("Total Amount (from Excel)", amt(p.amount))}${item("Payment Status", esc(p.paymentStatus || "PENDING"))}${item("Payment Reference / UTR", p.paymentRef ? esc(p.paymentRef) : NA_CELL)}${item("Adjustment Reason", p.adjustmentReason ? esc(p.adjustmentReason) : NA_CELL)}${item("Source file", esc(p.sourceFile || (p.manual ? "Manual adjustment" : "—")))}` +
       `${item("Sheet / row", esc([p.sheet, p.rowNumber].filter(Boolean).join(" · ") || "—"))}${item("Imported", esc(p.importedAt ? new Date(p.importedAt).toLocaleString("en-IN") : "—"))}</div>` +
-      `<div class="modal-actions"><button type="button" class="ghost" onclick="closeModal()">Close</button>${p.riderId ? '<button type="button" class="primary" id="weeklyOpenRiderProfile">Open Rider Profile</button>' : ""}</div>`,
+      `<div class="modal-actions"><button type="button" class="ghost" onclick="closeModal()">Close</button><button type="button" class="ghost" id="weeklyEditAdjustment">Edit Orders, Amounts &amp; Payment</button>${p.riderId ? '<button type="button" class="primary" id="weeklyOpenRiderProfile">Open Rider Profile</button>' : ""}</div>`,
   );
+  $("#weeklyEditAdjustment")?.addEventListener("click", () => {
+    closeModal();
+    openManualAdjustmentModal(p);
+  });
   $("#weeklyOpenRiderProfile")?.addEventListener("click", () => {
     closeModal();
     viewRider(p.riderId);
   });
 }
+
+// ---------- Manual Adjustment (Orders, Amounts & Payment Details) ----------
+function maNum(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function maExtractFields(r = {}) {
+  const lm = maNum(r.lm, 0);
+  const primary = maNum(r.primary ?? r.primaryOrders, 0);
+  const club = maNum(r.club, 0);
+  const sdd = maNum(r.sdd, 0);
+  const totalOrders = maNum(r.totalOrders, lm + primary + club + sdd);
+
+  const lmAmount = maNum(r.lmAmount, 0);
+  const primeAmount = maNum(r.primeAmount, 0);
+  const clubAmount = maNum(r.clubAmount, 0);
+  const sddAmount = maNum(r.sddAmount, 0);
+  const amount = maNum(
+    r.amount,
+    lmAmount + primeAmount + clubAmount + sddAmount,
+  );
+
+  return {
+    riderId: String(r.riderId ?? ""),
+    riderName: String(r.rider ?? r.riderName ?? ""),
+    week: String(r.week ?? r.weekLabel ?? ""),
+    weekStart: String(r.weekStart ?? ""),
+    weekEnd: String(r.weekEnd ?? ""),
+    days: maNum(r.days, 0),
+    totalOrders,
+    lm,
+    primary,
+    club,
+    sdd,
+    lmAmount,
+    primeAmount,
+    clubAmount,
+    sddAmount,
+    amount,
+    paymentStatus: String(r.paymentStatus ?? "PENDING").toUpperCase(),
+    paymentRef: String(r.paymentRef ?? ""),
+    reason: String(r.adjustmentReason ?? ""),
+  };
+}
+
+function maPopulateForm(vals) {
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (el) el.value = v;
+  };
+  setVal("maRiderId", vals.riderId);
+  setVal("maRiderName", vals.riderName);
+  setVal("maWeek", vals.week);
+  setVal("maDays", vals.days);
+  setVal("maTotalOrders", vals.totalOrders);
+  setVal("maLmOrders", vals.lm);
+  setVal("maPrimeOrders", vals.primary);
+  setVal("maClubOrders", vals.club);
+  setVal("maSddOrders", vals.sdd);
+  setVal("maTotalAmount", vals.amount);
+  setVal("maLmAmount", vals.lmAmount);
+  setVal("maPrimeAmount", vals.primeAmount);
+  setVal("maClubAmount", vals.clubAmount);
+  setVal("maSddAmount", vals.sddAmount);
+  setVal("maPaymentStatus", vals.paymentStatus || "PENDING");
+  setVal("maPaymentRef", vals.paymentRef);
+  setVal("maReason", vals.reason);
+}
+
+function openManualAdjustmentModal(preselectedRecord = null) {
+  const rows = Array.isArray(weeklyStore?.rows) ? weeklyStore.rows : [];
+  const initialId = preselectedRecord?.id ?? rows[0]?.id ?? "";
+  const initialRow =
+    rows.find((r) => String(r.id) === String(initialId)) ||
+    preselectedRecord ||
+    {};
+  const f0 = maExtractFields(initialRow);
+
+  const optionsHtml = [
+    `<option value="">— New / Standalone Adjustment —</option>`,
+    ...rows.map((r) => {
+      const labelName = r.rider || r.riderName || r.riderId || r.id;
+      const labelWeek = r.week || r.weekLabel || "";
+      const labelTot = r.amount ?? 0;
+      const selected =
+        String(r.id) === String(initialRow.id ?? "") ? "selected" : "";
+      return `<option value="${esc(r.id)}" ${selected}>${esc(labelName)}${labelWeek ? ` · ${esc(labelWeek)}` : ""} (₹${esc(labelTot)})</option>`;
+    }),
+  ].join("");
+
+  const statuses = ["PENDING", "PROCESSING", "PAID", "FAILED"]
+    .map(
+      (st) =>
+        `<option value="${st}" ${f0.paymentStatus === st ? "selected" : ""}>${st}</option>`,
+    )
+    .join("");
+
+  openModal(`
+    <h3>Manual Payment, Order &amp; Amount Adjustment</h3>
+    <form id="manualAdjustmentForm" class="form-grid">
+      <div class="field span2">
+        <label for="maRecordSelect">Weekly Payment Row (select an existing row to edit orders, amounts &amp; payment details)</label>
+        <select id="maRecordSelect">${optionsHtml}</select>
+      </div>
+
+      <div class="field">
+        <label for="maRiderId">Rider ID</label>
+        <input id="maRiderId" type="text" value="${esc(f0.riderId)}" placeholder="e.g. 2055372">
+      </div>
+      <div class="field">
+        <label for="maRiderName">Rider Name *</label>
+        <input id="maRiderName" type="text" required value="${esc(f0.riderName)}" placeholder="Rider full name">
+      </div>
+      <div class="field">
+        <label for="maWeek">Week</label>
+        <input id="maWeek" type="text" value="${esc(f0.week)}" placeholder="e.g. 24/08/2026 - 30/08/2026">
+      </div>
+      <div class="field">
+        <label for="maDays">Days</label>
+        <input id="maDays" type="number" min="0" max="31" step="1" value="${esc(f0.days)}">
+      </div>
+
+      <div class="field">
+        <label for="maTotalOrders">Total Orders</label>
+        <input id="maTotalOrders" type="number" min="0" step="1" value="${esc(f0.totalOrders)}">
+      </div>
+      <div class="field">
+        <label for="maLmOrders">LM Orders</label>
+        <input id="maLmOrders" type="number" min="0" step="1" value="${esc(f0.lm)}">
+      </div>
+      <div class="field">
+        <label for="maPrimeOrders">Prime Orders</label>
+        <input id="maPrimeOrders" type="number" min="0" step="1" value="${esc(f0.primary)}">
+      </div>
+      <div class="field">
+        <label for="maClubOrders">Club Orders</label>
+        <input id="maClubOrders" type="number" min="0" step="1" value="${esc(f0.club)}">
+      </div>
+      <div class="field">
+        <label for="maSddOrders">SDD Orders</label>
+        <input id="maSddOrders" type="number" min="0" step="1" value="${esc(f0.sdd)}">
+      </div>
+
+      <div class="field">
+        <label for="maTotalAmount">Total Amount (₹) *</label>
+        <input id="maTotalAmount" type="number" step="0.01" required value="${esc(f0.amount)}">
+      </div>
+      <div class="field">
+        <label for="maLmAmount">LM Amount (₹)</label>
+        <input id="maLmAmount" type="number" step="0.01" value="${esc(f0.lmAmount)}">
+      </div>
+      <div class="field">
+        <label for="maPrimeAmount">Prime Amount (₹)</label>
+        <input id="maPrimeAmount" type="number" step="0.01" value="${esc(f0.primeAmount)}">
+      </div>
+      <div class="field">
+        <label for="maClubAmount">Club Amount (₹)</label>
+        <input id="maClubAmount" type="number" step="0.01" value="${esc(f0.clubAmount)}">
+      </div>
+      <div class="field">
+        <label for="maSddAmount">SDD Amount (₹)</label>
+        <input id="maSddAmount" type="number" step="0.01" value="${esc(f0.sddAmount)}">
+      </div>
+
+      <div class="field">
+        <label for="maPaymentStatus">Payment Status</label>
+        <select id="maPaymentStatus">${statuses}</select>
+      </div>
+      <div class="field">
+        <label for="maPaymentRef">Payment Reference / UTR</label>
+        <input id="maPaymentRef" type="text" value="${esc(f0.paymentRef)}" placeholder="e.g. UTR / bank / payout ref">
+      </div>
+      <div class="field span2">
+        <label for="maReason">Adjustment Reason / Note</label>
+        <input id="maReason" type="text" value="${esc(f0.reason)}" placeholder="e.g. Order count update, bonus, or payment correction">
+      </div>
+
+      <p id="maError" class="field-error span2" role="alert"></p>
+      <div class="modal-actions span2">
+        <button type="button" class="ghost" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="primary" id="maSaveBtn">Save Adjustment</button>
+      </div>
+    </form>
+  `);
+
+  let manualOrdersOverride = false;
+  let manualAmountOverride = false;
+
+  const selectEl = document.getElementById("maRecordSelect");
+  selectEl?.addEventListener("change", () => {
+    manualOrdersOverride = false;
+    manualAmountOverride = false;
+    const picked = rows.find((r) => String(r.id) === String(selectEl.value));
+    maPopulateForm(maExtractFields(picked || {}));
+  });
+
+  document.getElementById("maTotalOrders")?.addEventListener("input", () => {
+    manualOrdersOverride = true;
+  });
+  ["maLmOrders", "maPrimeOrders", "maClubOrders", "maSddOrders"].forEach(
+    (id) => {
+      document.getElementById(id)?.addEventListener("input", () => {
+        if (manualOrdersOverride) return;
+        const sum =
+          maNum(document.getElementById("maLmOrders")?.value, 0) +
+          maNum(document.getElementById("maPrimeOrders")?.value, 0) +
+          maNum(document.getElementById("maClubOrders")?.value, 0) +
+          maNum(document.getElementById("maSddOrders")?.value, 0);
+        const totEl = document.getElementById("maTotalOrders");
+        if (totEl) totEl.value = String(sum);
+      });
+    },
+  );
+
+  document.getElementById("maTotalAmount")?.addEventListener("input", () => {
+    manualAmountOverride = true;
+  });
+  ["maLmAmount", "maPrimeAmount", "maClubAmount", "maSddAmount"].forEach(
+    (id) => {
+      document.getElementById(id)?.addEventListener("input", () => {
+        if (manualAmountOverride) return;
+        const sum =
+          maNum(document.getElementById("maLmAmount")?.value, 0) +
+          maNum(document.getElementById("maPrimeAmount")?.value, 0) +
+          maNum(document.getElementById("maClubAmount")?.value, 0) +
+          maNum(document.getElementById("maSddAmount")?.value, 0);
+        const totEl = document.getElementById("maTotalAmount");
+        if (totEl) totEl.value = sum.toFixed(2);
+      });
+    },
+  );
+
+  document
+    .getElementById("manualAdjustmentForm")
+    ?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errEl = document.getElementById("maError");
+      const saveBtn = document.getElementById("maSaveBtn");
+      if (errEl) errEl.textContent = "";
+
+      const recordId = (selectEl?.value || "").trim();
+      const riderId = (
+        document.getElementById("maRiderId")?.value || ""
+      ).trim();
+      const riderName = (
+        document.getElementById("maRiderName")?.value || ""
+      ).trim();
+      const week = (document.getElementById("maWeek")?.value || "").trim();
+      const days = maNum(document.getElementById("maDays")?.value, 0);
+      const totalOrders = maNum(
+        document.getElementById("maTotalOrders")?.value,
+        0,
+      );
+      const lm = maNum(document.getElementById("maLmOrders")?.value, 0);
+      const primary = maNum(document.getElementById("maPrimeOrders")?.value, 0);
+      const club = maNum(document.getElementById("maClubOrders")?.value, 0);
+      const sdd = maNum(document.getElementById("maSddOrders")?.value, 0);
+
+      const amount = maNum(
+        document.getElementById("maTotalAmount")?.value,
+        NaN,
+      );
+      const lmAmount = maNum(document.getElementById("maLmAmount")?.value, 0);
+      const primeAmount = maNum(
+        document.getElementById("maPrimeAmount")?.value,
+        0,
+      );
+      const clubAmount = maNum(
+        document.getElementById("maClubAmount")?.value,
+        0,
+      );
+      const sddAmount = maNum(document.getElementById("maSddAmount")?.value, 0);
+      const paymentStatus = (
+        document.getElementById("maPaymentStatus")?.value || "PENDING"
+      ).toUpperCase();
+      const paymentRef = (
+        document.getElementById("maPaymentRef")?.value || ""
+      ).trim();
+      const reason = (document.getElementById("maReason")?.value || "").trim();
+
+      if (!riderName) {
+        if (errEl) errEl.textContent = "Rider Name is required.";
+        return;
+      }
+      if (!Number.isFinite(amount)) {
+        if (errEl) errEl.textContent = "Enter a valid Total Amount.";
+        return;
+      }
+
+      if (saveBtn) saveBtn.disabled = true;
+      try {
+        await weeklyRequest("/adjustments", {
+          method: "POST",
+          body: {
+            recordId: recordId || undefined,
+            riderId,
+            riderName,
+            week,
+            days,
+            totalOrders,
+            lm,
+            primary,
+            club,
+            sdd,
+            lmAmount,
+            primeAmount,
+            clubAmount,
+            sddAmount,
+            amount,
+            paymentStatus,
+            paymentRef,
+            reason,
+          },
+        });
+        closeModal();
+        await loadWeeklyPayments();
+        toast("Manual adjustment saved");
+      } catch (err) {
+        if (errEl)
+          errEl.textContent = err.message || "Could not save adjustment.";
+        if (saveBtn) saveBtn.disabled = false;
+      }
+    });
+}
+window.openManualAdjustmentModal = openManualAdjustmentModal;
+
 function paintWeeklyPayments() {
   const body = $("#paymentWeeklyRows");
   if (!body) return;
@@ -3974,6 +4308,10 @@ function bindPayments() {
     weeklyStore.query = paymentSearch.value;
     weeklyStore.page = 1;
     paintWeeklyPayments();
+  });
+  $("#addPayment")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    openManualAdjustmentModal();
   });
   loadWeeklyPayments();
   $("#paymentExcelImport")?.addEventListener("change", async (e) => {
