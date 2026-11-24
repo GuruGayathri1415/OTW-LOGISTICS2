@@ -64,6 +64,19 @@ const cleanDigits = (s) =>
 const NOISE_NAME_RE =
   /^(?:my\s+profile|profile|personal\s+info|my\s+documents|shadowfax(?:\s+kit)?|terms(?:\s+and\s+conditions)?|whatsapp(?:\s+opt\s+in)?|sign\s+out|group(?:\s*[:\-].*)?|id(?:\s*[:\-].*)?)$/i;
 
+function normalizeCandidateMobile(rawToken, partnerId = "") {
+  let digits = cleanDigits(rawToken).replace(/\D/g, "");
+  if (digits.length === 12 && digits.startsWith("91")) {
+    digits = digits.slice(2);
+  } else if (digits.length === 11 && digits.startsWith("0")) {
+    digits = digits.slice(1);
+  }
+  if (/^[6-9]\d{9}$/.test(digits) && digits !== partnerId) {
+    return digits;
+  }
+  return "";
+}
+
 function extractMobile(lines, partnerId = "") {
   const candidates = [...lines];
   for (let i = 0; i < lines.length - 1; i++) {
@@ -71,18 +84,33 @@ function extractMobile(lines, partnerId = "") {
   }
 
   for (const rawLine of candidates) {
-    const line = cleanDigits(rawLine).replace(
-      /(?:\+?91[\s-]?|(?<!\d)0(?=\s*[6-9]))/g,
-      " ",
+    const cleaned = cleanDigits(rawLine)
+      .replace(/[•·–—/()[\]:]+/g, " ")
+      .replace(/\+91/g, " ");
+
+    // First check explicit phone/mobile labels if present
+    const labeledMatch = cleaned.match(
+      /(?:mobile|phone|contact|whatsapp)\s*(?:no\.?|number)?\s*([+0-9\s-]{10,20})/i,
     );
-    const matches = line.matchAll(
-      /(?:^|[^\d])([6-9](?:[\s-]?[0-9]){9})(?:[^\d]|$)/g,
+    if (labeledMatch) {
+      const found = normalizeCandidateMobile(labeledMatch[1], partnerId);
+      if (found) return found;
+    }
+
+    // Next check contiguous digit sequences (10–12 digits, e.g., 7812870644 or 917812870644)
+    const seqMatches = cleaned.matchAll(/\d{10,12}/g);
+    for (const m of seqMatches) {
+      const found = normalizeCandidateMobile(m[0], partnerId);
+      if (found) return found;
+    }
+
+    // Finally check spaced/hyphenated 10-digit mobile sequences
+    const spacedMatches = cleaned.matchAll(
+      /(?:^|[^\d])([6-9](?:[\s-]*\d){9})(?:[^\d]|$)/g,
     );
-    for (const m of matches) {
-      const digits = m[1].replace(/\D/g, "");
-      if (/^[6-9]\d{9}$/.test(digits) && digits !== partnerId) {
-        return digits;
-      }
+    for (const m of spacedMatches) {
+      const found = normalizeCandidateMobile(m[1], partnerId);
+      if (found) return found;
     }
   }
   return "";
