@@ -654,7 +654,9 @@ function paintEmployees(q = "") {
   ensureEmployees();
   const body = $("#employeeRows");
   if (!body) return;
-  const term = String(q || "").trim().toLowerCase();
+  const term = String(q || "")
+    .trim()
+    .toLowerCase();
   const list = !term
     ? db.employees
     : db.employees.filter((e) =>
@@ -944,3 +946,231 @@ function bindDashboard() {
     toast("Dashboard refreshed");
   });
 }
+
+function riders() {
+  return (
+    layout(
+      "Riders",
+      "Add, search, edit and manage rider profiles.",
+      '<button class="primary" id="addRiderBtn">+ Add Rider</button>',
+    ) +
+    `<div class="card"><input class="search" id="riderSearch" placeholder="Search rider name, ID, hub or phone..." autocomplete="off"><div class="table-wrap"><table class="table"><thead><tr><th>Rider ID</th><th>Name</th><th>Hub</th><th>Phone</th><th>Vehicle</th><th>Status</th><th>Actions</th></tr></thead><tbody id="riderRows"></tbody></table></div></div>`
+  );
+}
+function paintRiders(q = "") {
+  const body = $("#riderRows");
+  if (!body) return;
+  const term = String(q || "")
+    .trim()
+    .toLowerCase();
+  const list = !term
+    ? db.riders
+    : db.riders.filter((r) =>
+        [r.id, r.name, r.hub, r.phone, r.vehicle, r.status]
+          .join(" ")
+          .toLowerCase()
+          .includes(term),
+      );
+  body.innerHTML = list.length
+    ? list
+        .map(
+          (r) =>
+            `<tr><td><b>${esc(r.id)}</b></td><td>${esc(r.name)}</td><td>${esc(r.hub || "—")}</td><td>${esc(r.phone || "—")}</td><td>${esc(r.vehicle || "—")}</td><td><span class="badge ${r.status === "Active" ? "success" : "danger"}">${esc(r.status || "Active")}</span></td><td><div class="mini-actions"><button class="btn-sm" onclick="editRider('${esc(r.id)}')">Edit</button><button class="btn-sm danger" onclick="deleteRider('${esc(r.id)}')">Delete</button></div></td></tr>`,
+        )
+        .join("")
+    : `<tr><td colspan="7" class="empty">${term ? "No matching riders." : "No riders found."}</td></tr>`;
+}
+function bindRiders() {
+  $("#addRiderBtn")?.addEventListener("click", () => riderModal());
+  $("#riderSearch")?.addEventListener("input", (e) =>
+    paintRiders(e.target.value),
+  );
+  paintRiders();
+}
+function riderModal(rider = null) {
+  const editing = !!rider;
+  const defaultId =
+    rider?.id || "R-" + String(db.riders.length + 1).padStart(4, "0");
+  openModal(`
+    <h3>${editing ? "Edit Rider" : "Add Rider"}</h3>
+    <form id="riderForm" class="form-grid">
+      <div class="field"><label>Rider ID *</label><input id="rId" required value="${esc(defaultId)}"></div>
+      <div class="field"><label>Name *</label><input id="rName" required value="${esc(rider?.name || "")}"></div>
+      <div class="field"><label>Hub</label><input id="rHub" value="${esc(rider?.hub || "")}"></div>
+      <div class="field"><label>Phone</label><input id="rPhone" value="${esc(rider?.phone || "")}"></div>
+      <div class="field"><label>Vehicle</label><input id="rVehicle" value="${esc(rider?.vehicle || "")}"></div>
+      <div class="field"><label>Status</label><select id="rStatus"><option ${!rider || rider.status === "Active" ? "selected" : ""}>Active</option><option ${rider?.status === "Inactive" ? "selected" : ""}>Inactive</option></select></div>
+      <div class="modal-actions span2"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="submit" class="primary">${editing ? "Save Changes" : "Save Rider"}</button></div>
+    </form>
+  `);
+  $("#riderForm").onsubmit = (e) => {
+    e.preventDefault();
+    const rec = {
+      id: $("#rId").value.trim(),
+      name: $("#rName").value.trim(),
+      hub: $("#rHub").value.trim(),
+      phone: $("#rPhone").value.trim(),
+      vehicle: $("#rVehicle").value.trim(),
+      status: $("#rStatus").value,
+    };
+    if (!rec.id || !rec.name) return toast("Rider ID and Name are required.");
+    if (editing) Object.assign(rider, rec);
+    else db.riders.unshift(rec);
+    save();
+    closeModal();
+    render("riders");
+    toast(editing ? "Rider updated" : "Rider added");
+  };
+}
+window.editRider = (id) => {
+  const r = db.riders.find((x) => x.id === id);
+  if (r) riderModal(r);
+};
+window.deleteRider = (id) => {
+  if (!confirm("Delete this rider?")) return;
+  db.riders = db.riders.filter((x) => x.id !== id);
+  save();
+  render("riders");
+  toast("Rider deleted");
+};
+
+function documents() {
+  return (
+    layout(
+      "Documents",
+      "Track rider and partner documents.",
+      '<button class="primary" id="addDocBtn">+ Add Document</button>',
+    ) +
+    `<div class="card"><div class="table-wrap"><table class="table"><thead><tr><th>ID</th><th>Title</th><th>Owner</th><th>Status</th><th>Actions</th></tr></thead><tbody id="docRows">${
+      db.documents.length
+        ? db.documents
+            .map(
+              (d) =>
+                `<tr><td><b>${esc(d.id)}</b></td><td>${esc(d.title)}</td><td>${esc(d.owner || "—")}</td><td><span class="badge ${d.status === "Verified" ? "success" : "danger"}">${esc(d.status || "Pending")}</span></td><td><button class="btn-sm danger" onclick="deleteDoc('${esc(d.id)}')">Delete</button></td></tr>`,
+            )
+            .join("")
+        : '<tr><td colspan="5" class="empty">No documents recorded.</td></tr>'
+    }</tbody></table></div></div>`
+  );
+}
+function bindDocuments() {
+  $("#addDocBtn")?.addEventListener("click", () => {
+    openModal(`
+      <h3>Add Document</h3>
+      <form id="docForm" class="form-grid">
+        <div class="field"><label>Title *</label><input id="dTitle" required></div>
+        <div class="field"><label>Owner</label><input id="dOwner"></div>
+        <div class="field"><label>Status</label><select id="dStatus"><option>Pending</option><option>Verified</option></select></div>
+        <div class="modal-actions span2"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="submit" class="primary">Save</button></div>
+      </form>
+    `);
+    $("#docForm").onsubmit = (e) => {
+      e.preventDefault();
+      db.documents.unshift({
+        id: uid("DOC"),
+        title: $("#dTitle").value.trim(),
+        owner: $("#dOwner").value.trim(),
+        status: $("#dStatus").value,
+      });
+      save();
+      closeModal();
+      render("documents");
+      toast("Document added");
+    };
+  });
+}
+window.deleteDoc = (id) => {
+  db.documents = db.documents.filter((d) => d.id !== id);
+  save();
+  render("documents");
+  toast("Document deleted");
+};
+
+function whatsapp() {
+  return (
+    layout(
+      "WhatsApp",
+      "Log and review WhatsApp updates.",
+      '<button class="primary" id="addMsgBtn">+ Log Message</button>',
+    ) +
+    `<div class="card"><div class="table-wrap"><table class="table"><thead><tr><th>ID</th><th>Recipient</th><th>Message</th><th>Actions</th></tr></thead><tbody>${
+      db.messages.length
+        ? db.messages
+            .map(
+              (m) =>
+                `<tr><td><b>${esc(m.id)}</b></td><td>${esc(m.to)}</td><td>${esc(m.text)}</td><td><button class="btn-sm danger" onclick="deleteMsg('${esc(m.id)}')">Delete</button></td></tr>`,
+            )
+            .join("")
+        : '<tr><td colspan="4" class="empty">No WhatsApp messages logged.</td></tr>'
+    }</tbody></table></div></div>`
+  );
+}
+function bindWhatsApp() {
+  $("#addMsgBtn")?.addEventListener("click", () => {
+    openModal(`
+      <h3>Log WhatsApp Message</h3>
+      <form id="msgForm" class="form-grid">
+        <div class="field"><label>Recipient *</label><input id="mTo" required></div>
+        <div class="field span2"><label>Message *</label><input id="mText" required></div>
+        <div class="modal-actions span2"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="submit" class="primary">Save</button></div>
+      </form>
+    `);
+    $("#msgForm").onsubmit = (e) => {
+      e.preventDefault();
+      db.messages.unshift({
+        id: uid("WA"),
+        to: $("#mTo").value.trim(),
+        text: $("#mText").value.trim(),
+      });
+      save();
+      closeModal();
+      render("whatsapp");
+      toast("Message logged");
+    };
+  });
+}
+window.deleteMsg = (id) => {
+  db.messages = db.messages.filter((m) => m.id !== id);
+  save();
+  render("whatsapp");
+  toast("Message removed");
+};
+
+function isPendingPartner(p) {
+  return String(p?.status || "Pending").toLowerCase() === "pending";
+}
+function syncPartnerApplications() {}
+function updatePartnerNavCount() {}
+function partners() {
+  return (
+    layout("Partners", "Manage partner accounts and applications.") +
+    `<div class="card"><div class="empty">${db.partners.length ? `${db.partners.length} partner record(s)` : "No partner applications yet."}</div></div>`
+  );
+}
+function bindPartners() {}
+
+function client() {
+  return (
+    layout("Client", "Manage client accounts and inquiries.") +
+    `<div class="card"><div class="empty">Client overview ready.</div></div>`
+  );
+}
+function bindClient() {}
+
+function reports() {
+  return (
+    layout("Reports", "Review operational and payment reports.") +
+    `<div class="card"><div class="empty">Reports ready.</div></div>`
+  );
+}
+function bindReports() {}
+
+function settings() {
+  return (
+    layout("Settings", "Admin portal preferences and session info.") +
+    `<div class="card"><p>Signed in as <b>${esc(currentUser?.name || "Admin")}</b> (${esc(currentUser?.email || "")}).</p></div>`
+  );
+}
+function bindSettings() {}
+
+function checkPasswordHelpRequests() {}
