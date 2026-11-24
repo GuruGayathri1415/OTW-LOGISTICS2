@@ -42,9 +42,38 @@ function toBackendSupportStatus(value) {
   return STATUS_TO_BACKEND[key] || key;
 }
 
-function extractPhoneFromDescription(desc = "") {
-  const m = String(desc || "").match(/\bContact Phone:\s*([+\d][\d\s\-()]{5,20})/i);
+function extractPhoneFromText(text = "") {
+  const m = String(text || "").match(
+    /(?:Contact\s*Phone|Phone|Mobile|WhatsApp)\s*[:\-]\s*([+\d][\d\s\-()]{5,20})/i,
+  );
   return m ? m[1].trim() : "";
+}
+
+function resolveTicketPhone(t = {}, events = []) {
+  const direct =
+    t.phone ||
+    t.contact_phone ||
+    t.contactPhone ||
+    t.contactNumber ||
+    t.contact_number ||
+    t.mobile ||
+    t.requester_phone ||
+    t.requesterPhone ||
+    "";
+  if (String(direct).trim()) return String(direct).trim();
+
+  const fromDesc = extractPhoneFromText(t.description || t.subject || "");
+  if (fromDesc) return fromDesc;
+
+  for (const ev of Array.isArray(events) ? events : []) {
+    if (ev?.meta?.phone && String(ev.meta.phone).trim()) {
+      return String(ev.meta.phone).trim();
+    }
+    const fromBody = extractPhoneFromText(ev?.body || "");
+    if (fromBody) return fromBody;
+  }
+
+  return "";
 }
 
 function hasTicketPhoto(t = {}, attachments = []) {
@@ -57,7 +86,7 @@ function hasTicketPhoto(t = {}, attachments = []) {
   return false;
 }
 
-function normalizeSupportTicket(t = {}, attachments = []) {
+function normalizeSupportTicket(t = {}, attachments = [], events = []) {
   const ticketId = t.ticketId || t.ticket_no || t.ticket_code || t.id || "";
   const portalType =
     t.portalType || t.portal_type || t.requester_role || "Email";
@@ -68,17 +97,13 @@ function normalizeSupportTicket(t = {}, attachments = []) {
   const accountLogin =
     t.accountLogin || t.account_login || t.requester_id || "";
   const description = t.description || t.subject || "";
-  const phone =
-    t.phone ||
-    t.contactNumber ||
-    t.mobile ||
-    extractPhoneFromDescription(description) ||
-    "";
-  const atts = Array.isArray(attachments) && attachments.length
-    ? attachments
-    : Array.isArray(t.attachments)
-      ? t.attachments
-      : [];
+  const phone = resolveTicketPhone(t, events);
+  const atts =
+    Array.isArray(attachments) && attachments.length
+      ? attachments
+      : Array.isArray(t.attachments)
+        ? t.attachments
+        : [];
   const hasPhoto = hasTicketPhoto(t, atts);
 
   return {
@@ -217,7 +242,9 @@ async function supLoad() {
     if (supStore.portal) qs.set("portal", supStore.portal);
     if (supStore.q.trim()) qs.set("q", supStore.q.trim());
     const out = await supRequest("/tickets?" + qs.toString());
-    supStore.tickets = (out.tickets || []).map((t) => normalizeSupportTicket(t));
+    supStore.tickets = (out.tickets || []).map((t) =>
+      normalizeSupportTicket(t),
+    );
     supStore.summary = out.summary || null;
     supStore.error = "";
   } catch (e) {
@@ -325,8 +352,12 @@ function supRenderModal(focusReply) {
   const attachments = Array.isArray(supStore.open?.attachments)
     ? supStore.open.attachments
     : [];
-  const t = normalizeSupportTicket(supStore.open.ticket || {}, attachments);
   const events = (supStore.open.events || []).map(normalizeSupportEvent);
+  const t = normalizeSupportTicket(
+    supStore.open.ticket || {},
+    attachments,
+    events,
+  );
   const emailJobs = supStore.open.emailJobs || [];
   const who = (ev) =>
     ev.authorRole === "admin"

@@ -16,6 +16,13 @@ import {
 const PHONE_OK = /^[6-9]\d{9}$/;
 const EMAIL_OK = /^[^\s@<>()",;:]+@[^\s@<>()",;:]+\.[^\s@<>()",;:]+$/;
 
+function extractContactPhone(text = "") {
+  const m = String(text || "").match(
+    /(?:Contact\s*Phone|Phone|Mobile|WhatsApp)\s*[:\-]\s*([+\d][\d\s\-()]{5,20})/i,
+  );
+  return m ? m[1].trim() : "";
+}
+
 function emailSentence(job) {
   if (!job) return "";
   if (job.status === "Sent") return "Our support team has been emailed about it.";
@@ -84,6 +91,22 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
     const ids = (evs || []).filter((e) => e.messageId);
     return ids.length ? ids[ids.length - 1].messageId : "";
   };
+
+  async function enrichPhone(ticket) {
+    if (!ticket || ticket.phone) return ticket;
+    const fromSubject = extractContactPhone(ticket.description || ticket.subject || "");
+    if (fromSubject) return { ...ticket, phone: fromSubject };
+    if (typeof service.events === "function") {
+      try {
+        const evs = await service.events(ticket.id);
+        for (const ev of evs || []) {
+          const found = extractContactPhone(ev?.body || "");
+          if (found) return { ...ticket, phone: found };
+        }
+      } catch {}
+    }
+    return ticket;
+  }
 
   async function notifyNewTicket(ticket) {
     try {
@@ -199,14 +222,16 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
   // ----- partner (Vendor / Franchise) -----
   app.get("/api/support/mine", mineLimiter, partnerGuard, async (req, res) => {
     try {
-      res.json({ tickets: await service.listForAccount(req.partner) });
+      const list = await service.listForAccount(req.partner);
+      res.json({ tickets: await Promise.all((list || []).map(enrichPhone)) });
     } catch (e) {
       fail(res, e, "Support list failed:");
     }
   });
   app.get("/api/support/mine/:id", mineLimiter, partnerGuard, async (req, res) => {
     try {
-      res.json(await service.getForAccount(req.params.id, req.partner));
+      const d = await service.getForAccount(req.params.id, req.partner);
+      res.json({ ...d, ticket: await enrichPhone(d.ticket) });
     } catch (e) {
       fail(res, e, "Support ticket read failed:");
     }
@@ -252,10 +277,13 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
         q: String(req.query.q || "").slice(0, 120),
       });
       out.tickets = await Promise.all(
-        (out.tickets || []).map(async (t) => ({
-          ...t,
-          newTicketEmail: typeof mailer?.newTicketStatus === "function" ? await mailer.newTicketStatus(t.id) : null,
-        })),
+        (out.tickets || []).map(async (t) => {
+          const withPhone = await enrichPhone(t);
+          return {
+            ...withPhone,
+            newTicketEmail: typeof mailer?.newTicketStatus === "function" ? await mailer.newTicketStatus(t.id) : null,
+          };
+        }),
       );
       const failedEmails = typeof mailer?.failedCount === "function" ? await mailer.failedCount() : 0;
       out.summary = { ...out.summary, failedEmails };
@@ -268,7 +296,7 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
     try {
       const d = await service.getForAdmin(req.params.id);
       const emailJobs = typeof mailer?.forTicket === "function" ? await mailer.forTicket(d.ticket.id) : [];
-      res.json({ ...d, emailJobs });
+      res.json({ ...d, ticket: await enrichPhone(d.ticket), emailJobs });
     } catch (e) {
       fail(res, e, "Support ticket read failed:");
     }
@@ -299,7 +327,7 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
       }
       const updated = await service.getForAdmin(t.id);
       const emailJobs = typeof mailer?.forTicket === "function" ? await mailer.forTicket(t.id) : [];
-      res.json({ ...updated, emailJobs, replyEmail: sent });
+      res.json({ ...updated, ticket: await enrichPhone(updated.ticket), emailJobs, replyEmail: sent });
     } catch (e) {
       fail(res, e, "Support reply failed:");
     }
@@ -311,7 +339,7 @@ export function registerSupportRoutes(app, { auth, service, mailer, inbound, sup
       const actor = req.adminEmail || req.account.login_id;
       const d = await service.setStatus(req.params.id, actor, status, req.body?.note);
       const emailJobs = typeof mailer?.forTicket === "function" ? await mailer.forTicket(d.ticket.id) : [];
-      res.json({ ...d, emailJobs });
+      res.json({ ...d, ticket: await enrichPhone(d.ticket), emailJobs });
     } catch (e) {
       fail(res, e, "Support status change failed:");
     }
