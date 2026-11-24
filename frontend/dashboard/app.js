@@ -2,6 +2,7 @@ const KEY = "owl_logistics_v1";
 // Admin accounts and passwords now live on the server (backend/auth.js); nothing secret is kept in this file.
 const seed = {
   riders: [],
+  employees: [],
   hubs: [],
   work: [], // Daily Work starts empty; records are added by the admin (or imported) only
   documents: [],
@@ -13,6 +14,7 @@ const seed = {
 let db =
   JSON.parse(localStorage.getItem(KEY) || "null") || structuredClone(seed);
 if (!Array.isArray(db.vendorMembers)) db.vendorMembers = [];
+if (!Array.isArray(db.employees)) db.employees = [];
 if (!Array.isArray(db.partners)) db.partners = [];
 // Admin access is restricted to exactly the four authorized accounts.
 // Older versions copied admin passwords into browser storage; remove them.
@@ -561,6 +563,7 @@ function render(page) {
   currentPage = page;
   const map = {
     dashboard: dashboard,
+    employee: employee,
     riders: riders,
     hub: hub,
     support: typeof supportManagement === "function" ? supportManagement : null,
@@ -588,6 +591,7 @@ function render(page) {
     return;
   }
   if (page === "dashboard") bindDashboard();
+  if (page === "employee") bindEmployee();
   if (page === "riders") bindRiders();
   if (page === "hub") bindHubs();
   if (page === "support" && typeof bindSupport === "function") bindSupport();
@@ -605,6 +609,156 @@ function render(page) {
     updateSupportNavRedAlert(supportAlertOpenCount);
 }
 window.render = render;
+
+function ensureEmployees() {
+  if (!Array.isArray(db.employees)) db.employees = [];
+}
+
+function employee() {
+  ensureEmployees();
+  return (
+    layout(
+      "Employees",
+      "View and manage company employees, roles and departments.",
+      '<button class="primary" id="addEmployeeBtn">+ Add Employee</button>',
+    ) +
+    `<div class="cards">
+      ${stat("Total Employees", db.employees.length, "empStatTotal")}
+      ${stat("Active", db.employees.filter((e) => e.status === "Active").length, "empStatActive")}
+      ${stat("Inactive", db.employees.filter((e) => e.status !== "Active").length, "empStatInactive")}
+    </div>
+    <div class="card">
+      <input class="search" id="employeeSearch" placeholder="Search employee name, ID, role, department or phone..." autocomplete="off">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Employee ID</th>
+              <th>Name</th>
+              <th>Role</th>
+              <th>Department</th>
+              <th>Phone</th>
+              <th>Email</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="employeeRows"></tbody>
+        </table>
+      </div>
+    </div>`
+  );
+}
+
+function paintEmployees(q = "") {
+  ensureEmployees();
+  const body = $("#employeeRows");
+  if (!body) return;
+  const term = String(q || "")
+    .trim()
+    .toLowerCase();
+  const list = !term
+    ? db.employees
+    : db.employees.filter((e) =>
+        [e.id, e.name, e.role, e.department, e.phone, e.email, e.status]
+          .join(" ")
+          .toLowerCase()
+          .includes(term),
+      );
+  body.innerHTML = list.length
+    ? list
+        .map(
+          (e) =>
+            `<tr>
+              <td><b>${esc(e.id)}</b></td>
+              <td>${esc(e.name)}</td>
+              <td>${esc(e.role || "—")}</td>
+              <td>${esc(e.department || "—")}</td>
+              <td>${esc(e.phone || "—")}</td>
+              <td>${esc(e.email || "—")}</td>
+              <td><span class="badge ${e.status === "Active" ? "success" : "danger"}">${esc(e.status || "Active")}</span></td>
+              <td>
+                <div class="mini-actions">
+                  <button class="btn-sm" onclick="editEmployee('${esc(e.id)}')">Edit</button>
+                  <button class="btn-sm danger" onclick="deleteEmployee('${esc(e.id)}')">Delete</button>
+                </div>
+              </td>
+            </tr>`,
+        )
+        .join("")
+    : `<tr><td colspan="8" class="empty">${term ? "No matching employees." : "No employees yet. Click + Add Employee."}</td></tr>`;
+}
+
+function bindEmployee() {
+  ensureEmployees();
+  $("#addEmployeeBtn")?.addEventListener("click", () => employeeModal());
+  $("#employeeSearch")?.addEventListener("input", (e) =>
+    paintEmployees(e.target.value),
+  );
+  paintEmployees();
+}
+
+function employeeModal(emp = null) {
+  ensureEmployees();
+  const editing = !!emp;
+  const defaultId =
+    emp?.id || "EMP-" + String(db.employees.length + 1).padStart(4, "0");
+  openModal(`
+    <h3>${editing ? "Edit Employee" : "Add Employee"}</h3>
+    <form id="employeeForm" class="form-grid">
+      <div class="field"><label>Employee ID *</label><input id="empId" required value="${esc(defaultId)}"></div>
+      <div class="field"><label>Name *</label><input id="empName" required value="${esc(emp?.name || "")}"></div>
+      <div class="field"><label>Role</label><input id="empRole" placeholder="e.g. Operations Executive" value="${esc(emp?.role || "")}"></div>
+      <div class="field"><label>Department</label><input id="empDept" placeholder="e.g. Logistics, Support" value="${esc(emp?.department || "")}"></div>
+      <div class="field"><label>Phone</label><input id="empPhone" inputmode="numeric" maxlength="15" value="${esc(emp?.phone || "")}"></div>
+      <div class="field"><label>Email</label><input id="empEmail" type="email" value="${esc(emp?.email || "")}"></div>
+      <div class="field"><label>Status</label><select id="empStatus"><option ${!emp || emp.status === "Active" ? "selected" : ""}>Active</option><option ${emp?.status === "Inactive" ? "selected" : ""}>Inactive</option></select></div>
+      <div class="modal-actions span2"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="submit" class="primary">${editing ? "Save Changes" : "Save Employee"}</button></div>
+    </form>
+  `);
+
+  $("#employeeForm").onsubmit = (e) => {
+    e.preventDefault();
+    const record = {
+      id: $("#empId").value.trim(),
+      name: $("#empName").value.trim(),
+      role: $("#empRole").value.trim(),
+      department: $("#empDept").value.trim(),
+      phone: $("#empPhone").value.trim(),
+      email: $("#empEmail").value.trim(),
+      status: $("#empStatus").value,
+    };
+    if (!record.id || !record.name)
+      return toast("Employee ID and Name are required.");
+    if (editing) {
+      Object.assign(emp, record);
+    } else {
+      if (
+        db.employees.some((x) => x.id.toLowerCase() === record.id.toLowerCase())
+      ) {
+        return toast("This Employee ID already exists.");
+      }
+      db.employees.unshift(record);
+    }
+    save();
+    closeModal();
+    render("employee");
+    toast(editing ? "Employee updated" : "Employee added");
+  };
+}
+
+window.editEmployee = (id) => {
+  const emp = (db.employees || []).find((x) => x.id === id);
+  if (emp) employeeModal(emp);
+};
+
+window.deleteEmployee = (id) => {
+  if (!confirm("Delete this employee?")) return;
+  db.employees = (db.employees || []).filter((x) => x.id !== id);
+  save();
+  render("employee");
+  toast("Employee deleted");
+};
 
 function rrItemsArray() {
   if (typeof rrItems === "undefined") return [];
