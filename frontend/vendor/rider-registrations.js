@@ -357,16 +357,21 @@
     if (el && el.focus) el.focus();
   }
 
-  // Choosing the delivery-app screenshot fills in Rider ID and Rider Name (read on the server). Values already typed
-  // are never overwritten, and filled fields are highlighted so the user checks them.
+  // Choosing the delivery-app screenshot fills in Rider ID, Rider Name, and Mobile Number (read on the server).
+  // Values already typed are never overwritten, and filled fields are highlighted so the user checks them.
   async function autoFillFromScreenshot(file) {
     const idEl = $("#rrId"),
       nameEl = $("#rrName"),
+      mobileEl = $("#rrMobile"),
       note = $("#rrOcrNote");
     if (!file || !idEl || !nameEl || !note) return;
-    if (idEl.value.trim() && nameEl.value.trim()) return;
+    const hasId = Boolean(idEl.value.trim());
+    const hasName = Boolean(nameEl.value.trim());
+    const hasMobile = Boolean(mobileEl && cleanMobile(mobileEl.value));
+    if (hasId && hasName && (!mobileEl || hasMobile)) return;
     note.className = "autofill-status busy wide";
-    note.textContent = "Reading the Rider ID and name from the screenshot…";
+    note.textContent =
+      "Reading the Rider ID, name, and mobile number from the screenshot…";
     try {
       const fd = new FormData();
       fd.append("file", file, file.name);
@@ -388,13 +393,19 @@
         nameEl.classList.add("autofilled");
         filled.push("Rider Name");
       }
+      const detectedMobile = cleanMobile(out.read?.mobile);
+      if (detectedMobile && mobileEl && !mobileEl.value.trim()) {
+        mobileEl.value = detectedMobile;
+        mobileEl.classList.add("autofilled");
+        filled.push("Mobile Number");
+      }
       note.className =
         "autofill-status wide " + (filled.length ? "ok" : "warn");
       note.textContent = filled.length
-        ? `${filled.join(" and ")} filled in from the screenshot. Please check before saving.`
-        : out.read?.partnerId || out.read?.name
+        ? `${filled.join(", ")} filled in from the screenshot. Please check before saving.`
+        : out.read?.partnerId || out.read?.name || detectedMobile
           ? ""
-          : "No Partner ID was found in this image. Please type the details.";
+          : "No Partner ID or mobile number was found in this image. Please type the details.";
     } catch (e) {
       if (!document.body.contains(note)) return;
       note.className = "autofill-status warn wide";
@@ -402,6 +413,7 @@
         "The screenshot could not be read automatically. Please type the details.";
     }
   }
+
   function openAddForm() {
     openModal(
       "Add New Member",
@@ -445,8 +457,8 @@
       $("#rrFormError").textContent = "";
       showPreview($("#rrAadhaarPreview"), e.target, "aadhaar");
     };
-    ["rrId", "rrName"].forEach((id) =>
-      $("#" + id).addEventListener("input", (ev) =>
+    ["rrId", "rrName", "rrMobile"].forEach((id) =>
+      $("#" + id)?.addEventListener("input", (ev) =>
         ev.target.classList.remove("autofilled"),
       ),
     );
