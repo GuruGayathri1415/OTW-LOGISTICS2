@@ -1109,9 +1109,11 @@ export async function createWeeklyPaymentService({
     const primaryOrders = num(input.primary ?? input.primaryOrders);
     const club = num(input.club);
     const sdd = num(input.sdd);
+    const explicitTotalOrders = num(input.totalOrders);
     const totalOrders =
-      num(input.totalOrders) ??
-      ((lm ?? 0) + (primaryOrders ?? 0) + (club ?? 0) + (sdd ?? 0) || null);
+      explicitTotalOrders !== null
+        ? explicitTotalOrders
+        : (lm ?? 0) + (primaryOrders ?? 0) + (club ?? 0) + (sdd ?? 0) || null;
 
     const lmAmount = num(input.lmAmount);
     const primeAmount = num(input.primeAmount);
@@ -1334,17 +1336,17 @@ export async function listForFranchise(db, accountId) {
   if (!accountId) return [];
   return db
     .prepare(
-      `SELECT wp.rider_id AS riderId,rr.rider_name AS riderName,
-      wp.week_label AS week,wp.week_key AS weekKey,wp.week_start AS weekStart,wp.week_end AS weekEnd,
+      `SELECT wp.rider_id AS "riderId", rr.rider_name AS "riderName",
+      wp.week_label AS week, wp.week_key AS "weekKey", wp.week_start AS "weekStart", wp.week_end AS "weekEnd",
       CASE WHEN wp.week_start ~ '^\\d{4}-\\d{2}-\\d{2}$' AND wp.week_end ~ '^\\d{4}-\\d{2}-\\d{2}$' AND (wp.week_end::date - wp.week_start::date) >= 8 THEN '15-day' ELSE 'weekly' END AS cycle,
-      wp.days AS days,wp.total_orders AS totalOrders,wp.lm AS lm,wp.primary_orders AS primaryOrders,
-      wp.club AS club,wp.sdd AS sdd,wp.lm_amount AS lmAmount,wp.prime_amount AS primeAmount,
-      wp.club_amount AS clubAmount,wp.sdd_amount AS sddAmount,COALESCE(wp.amount,0) AS amount
+      wp.days AS days, wp.total_orders AS "totalOrders", wp.lm AS lm, wp.primary_orders AS "primaryOrders",
+      wp.club AS club, wp.sdd AS sdd, wp.lm_amount AS "lmAmount", wp.prime_amount AS "primeAmount",
+      wp.club_amount AS "clubAmount", wp.sdd_amount AS "sddAmount", COALESCE(wp.amount,0) AS amount
     FROM weekly_payments wp
     JOIN rider_registrations rr ON lower(trim(rr.rider_id))=lower(trim(wp.rider_id))
     WHERE rr.owner_account_id=? AND rr.registration_source='Franchise' AND rr.application_status='APPROVED'
       AND wp.rider_id<>'' AND wp.rider_key NOT LIKE 'provisional:%'
-    ORDER BY wp.week_start DESC,wp.week_end DESC,LOWER(wp.sheet),COALESCE(wp.row_number,0),LOWER(rr.rider_name)
+    ORDER BY wp.week_start DESC, wp.week_end DESC, LOWER(wp.sheet), COALESCE(wp.row_number,0), LOWER(rr.rider_name)
     LIMIT 50000`,
     )
     .all(accountId);
@@ -1354,17 +1356,17 @@ export async function listForVendor(db, accountId) {
   if (!accountId) return [];
   return db
     .prepare(
-      `SELECT wp.rider_id AS riderId,rr.rider_name AS riderName,
-      wp.week_label AS week,wp.week_key AS weekKey,wp.week_start AS weekStart,wp.week_end AS weekEnd,
+      `SELECT wp.rider_id AS "riderId", rr.rider_name AS "riderName",
+      wp.week_label AS week, wp.week_key AS "weekKey", wp.week_start AS "weekStart", wp.week_end AS "weekEnd",
       CASE WHEN wp.week_start ~ '^\\d{4}-\\d{2}-\\d{2}$' AND wp.week_end ~ '^\\d{4}-\\d{2}-\\d{2}$' AND (wp.week_end::date - wp.week_start::date) >= 8 THEN '15-day' ELSE 'weekly' END AS cycle,
-      wp.days AS days,wp.total_orders AS totalOrders,wp.lm AS lm,wp.primary_orders AS primaryOrders,
-      wp.club AS club,wp.sdd AS sdd,wp.lm_amount AS lmAmount,wp.prime_amount AS primeAmount,
-      wp.club_amount AS clubAmount,wp.sdd_amount AS sddAmount,COALESCE(wp.amount,0) AS amount
+      wp.days AS days, wp.total_orders AS "totalOrders", wp.lm AS lm, wp.primary_orders AS "primaryOrders",
+      wp.club AS club, wp.sdd AS sdd, wp.lm_amount AS "lmAmount", wp.prime_amount AS "primeAmount",
+      wp.club_amount AS "clubAmount", wp.sdd_amount AS "sddAmount", COALESCE(wp.amount,0) AS amount
     FROM weekly_payments wp
     JOIN rider_registrations rr ON lower(trim(rr.rider_id))=lower(trim(wp.rider_id))
     WHERE rr.owner_account_id=? AND rr.registration_source='Vendor' AND rr.application_status='APPROVED'
       AND wp.rider_id<>'' AND wp.rider_key NOT LIKE 'provisional:%'
-    ORDER BY wp.week_start DESC,wp.week_end DESC,LOWER(wp.sheet),COALESCE(wp.row_number,0),LOWER(rr.rider_name)
+    ORDER BY wp.week_start DESC, wp.week_end DESC, LOWER(wp.sheet), COALESCE(wp.row_number,0), LOWER(rr.rider_name)
     LIMIT 50000`,
     )
     .all(accountId);
@@ -1374,10 +1376,10 @@ export async function partnerGroupsForImport(db, importId) {
   if (!importId) return [];
   return db
     .prepare(
-      `SELECT a.id AS accountId, a.role AS role, COUNT(*) AS records,
+      `SELECT a.id AS "accountId", a.role AS role, COUNT(*) AS records,
         COUNT(DISTINCT lower(trim(wp.rider_id))) AS riders,
-        MIN(NULLIF(wp.week_start,'')) AS fromDay,
-        MAX(COALESCE(NULLIF(wp.week_end,''),NULLIF(wp.week_start,''))) AS toDay,
+        MIN(NULLIF(wp.week_start,'')) AS "fromDay",
+        MAX(COALESCE(NULLIF(wp.week_end,''),NULLIF(wp.week_start,''))) AS "toDay",
         SUM(COALESCE(wp.total_orders, COALESCE(wp.lm,0)+COALESCE(wp.primary_orders,0)+COALESCE(wp.club,0))) AS orders
       FROM weekly_payments wp
       JOIN rider_registrations rr ON lower(trim(rr.rider_id))=lower(trim(wp.rider_id))
