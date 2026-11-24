@@ -1,8 +1,9 @@
-// Vendor Portal → Reports: the dashboard numbers, calculated on the server from the saved Excel rows.
+// Vendor & Franchise Portal → Reports: the dashboard numbers, calculated on the server from the saved Excel rows.
 //
-// The Orders page and the Reports page read the same source: the weekly_payments rows that listForVendor() returns
-// (only approved riders this vendor registered, matched by Rider ID). This module only adds up those rows. It never
-// invents a count, never recalculates the Excel Total Orders, and never uses the partner's older manual order records.
+// The Orders page and the Reports page read the same source: the weekly_payments rows that listForVendor() /
+// listForFranchise() returns (only approved riders this partner registered, matched by Rider ID). This module
+// only adds up those rows. It never invents a count, never recalculates the Excel Total Orders, and never uses
+// the partner's older manual order records.
 //
 // Column mapping (Excel → Reports):
 //   Total Orders → weekly / all-time total      Prime Orders → Primary Orders
@@ -17,6 +18,27 @@ const num = (v) =>
     : Number(v);
 const isBlankCount = (v) =>
   v === null || v === undefined || v === "" || !Number.isFinite(Number(v));
+
+// Normalize row field names in case PostgreSQL returned lowercase aliases.
+function normalizeRow(r = {}) {
+  return {
+    ...r,
+    riderId: r.riderId ?? r.riderid ?? r.rider_id ?? "",
+    riderName: r.riderName ?? r.ridername ?? r.rider_name ?? "",
+    week: r.week ?? r.week_label ?? "",
+    weekKey: r.weekKey ?? r.weekkey ?? r.week_key ?? "",
+    weekStart: r.weekStart ?? r.weekstart ?? r.week_start ?? "",
+    weekEnd: r.weekEnd ?? r.weekend ?? r.week_end ?? "",
+    totalOrders: r.totalOrders ?? r.totalorders ?? r.total_orders ?? null,
+    primaryOrders:
+      r.primaryOrders ?? r.primaryorders ?? r.primary_orders ?? null,
+    lmAmount: r.lmAmount ?? r.lmamount ?? r.lm_amount ?? null,
+    primeAmount: r.primeAmount ?? r.primeamount ?? r.prime_amount ?? null,
+    clubAmount: r.clubAmount ?? r.clubamount ?? r.club_amount ?? null,
+    sddAmount: r.sddAmount ?? r.sddamount ?? r.sdd_amount ?? null,
+  };
+}
+
 // Total Orders as saved from the Excel sheet. Rows saved without one (older imports of sheets with no Total Orders
 // column) use the same rule as the Admin Reports page (report-stats.js): LM + Prime + Club, so both pages agree.
 const totalOf = (r) =>
@@ -58,7 +80,8 @@ export const listApprovedRidersForFranchise = (db, accountId) =>
 // One row per rider per period. The same rider and period sent twice is counted once.
 function uniqueRows(records) {
   const seen = new Map();
-  for (const r of Array.isArray(records) ? records : []) {
+  for (const raw of Array.isArray(records) ? records : []) {
+    const r = normalizeRow(raw);
     const rider = normalizeRiderKey(r.riderId);
     if (!rider) continue;
     const period =
@@ -124,13 +147,12 @@ export function buildPartnerReport(records, riders, { week = "" } = {}) {
   const riderKeys = new Set();
   const locations = new Set();
   for (const r of riderList) {
-    const key = normalizeRiderKey(r.riderId);
+    const key = normalizeRiderKey(r.riderId ?? r.riderid ?? r.rider_id);
     if (!key) continue;
     riderKeys.add(key);
-    if (isValidLocation(r.hubLocation))
-      locations.add(
-        String(r.hubLocation).replace(/\s+/g, " ").trim().toLowerCase(),
-      );
+    const hub = r.hubLocation ?? r.hublocation ?? r.hub_location;
+    if (isValidLocation(hub))
+      locations.add(String(hub).replace(/\s+/g, " ").trim().toLowerCase());
   }
   const withOrders = new Set(
     rows.filter((r) => totalOf(r) > 0).map((r) => r.riderKey),
@@ -205,16 +227,12 @@ export function buildPartnerReport(records, riders, { week = "" } = {}) {
 export async function partnerPortalPayload(db, role, accountId, week = "") {
   const isVendor = role === "vendor";
   const [rawRecords, riders] = await Promise.all([
-    isVendor
-      ? listForVendor(db, accountId)
-      : listForFranchise(db, accountId),
-    listApprovedRidersFor(
-      db,
-      accountId,
-      isVendor ? "Vendor" : "Franchise",
-    ),
+    isVendor ? listForVendor(db, accountId) : listForFranchise(db, accountId),
+    listApprovedRidersFor(db, accountId, isVendor ? "Vendor" : "Franchise"),
   ]);
-  const records = Array.isArray(rawRecords) ? rawRecords : [];
+  const records = (Array.isArray(rawRecords) ? rawRecords : []).map(
+    normalizeRow,
+  );
   return { records, report: buildPartnerReport(records, riders, { week }) };
 }
 export const vendorPortalPayload = (db, accountId, week = "") =>
