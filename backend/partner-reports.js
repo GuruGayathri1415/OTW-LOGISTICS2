@@ -221,7 +221,8 @@ export function buildPartnerReport(records, riders, { week = "" } = {}) {
     rows.filter((r) => totalOf(r) > 0).map((r) => r.riderKey),
   );
 
-  const weeklyRows = rows.filter((r) => r.cycle === "weekly");
+  const exactWeeklyRows = rows.filter((r) => r.cycle === "weekly");
+  const weeklyRows = exactWeeklyRows.length ? exactWeeklyRows : rows;
   const fifteenRows = rows.filter((r) => r.cycle === "15-day");
 
   // Every weekly period, newest first: the Week selector and the choice of the default week.
