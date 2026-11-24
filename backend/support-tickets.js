@@ -1,4 +1,5 @@
-// Support tickets, events, and attachments backed by the async PostgreSQL adapter (`db-adapter.js`).
+// Support tickets, events, and attachments backed by the async PostgreSQL adapter (`db-adapter.js`)
+// and Supabase Storage (with local disk fallback when Supabase Storage is not configured).
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -57,6 +58,64 @@ export class SupportError extends Error {
 export function partnerPortalType(role) {
   const r = String(role || "").toLowerCase();
   return r === "vendor" || r === "franchise" ? r : "";
+}
+
+const SUPABASE_URL = String(process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+const SUPABASE_KEY = String(
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || "",
+);
+const SUPABASE_SUPPORT_BUCKET = String(
+  process.env.SUPABASE_SUPPORT_BUCKET || "support-tickets",
+);
+const useSupabaseStorage = Boolean(SUPABASE_URL && SUPABASE_KEY);
+
+function encodeStoragePath(objectPath) {
+  return String(objectPath)
+    .split("/")
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join("/");
+}
+
+async function uploadToSupabase(objectPath, buffer, mime) {
+  const url = `${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(SUPABASE_SUPPORT_BUCKET)}/${encodeStoragePath(objectPath)}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      apikey: SUPABASE_KEY,
+      "Content-Type": mime || "application/octet-stream",
+      "x-upsert": "true",
+    },
+    body: buffer,
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new SupportError(
+      `Could not store support photo in Supabase (${res.status}): ${errText || res.statusText}`,
+      500,
+    );
+  }
+}
+
+async function downloadFromSupabase(objectPath) {
+  const url = `${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(SUPABASE_SUPPORT_BUCKET)}/${encodeStoragePath(objectPath)}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      apikey: SUPABASE_KEY,
+    },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new SupportError(
+      `Could not load support photo from Supabase (${res.status})`,
+      500,
+    );
+  }
+  const arrayBuf = await res.arrayBuffer();
+  return Buffer.from(arrayBuf);
 }
 
 export async function createSupportService({ db, uploadDir }) {
@@ -338,6 +397,16 @@ export async function createSupportService({ db, uploadDir }) {
     const att =
       atts.find((a) => String(a.mime || "").startsWith("image/")) || atts[0];
     if (!att || !att.stored_name) return null;
+
+    if (useSupabaseStorage) {
+      const buffer = await downloadFromSupabase(
+        `${ticketRow.id}/${att.stored_name}`,
+      );
+      if (buffer) {
+        return { buffer, mime: att.mime, name: att.original_name };
+      }
+    }
+
     const abs = path.join(
       supportUploadRoot,
       String(ticketRow.id),
@@ -673,18 +742,22 @@ export async function createSupportService({ db, uploadDir }) {
       MIME_TO_EXT[mime.toLowerCase()] ||
       path.extname(String(file.originalname || "")).slice(0, 12);
     const storedName = `${attId}${ext}`;
-    const ticketDir = path.join(supportUploadRoot, String(ticketId));
-    fs.mkdirSync(ticketDir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(path.join(ticketDir, storedName), file.buffer, {
-      mode: 0o600,
-    });
-
     const createdAt = nowIso();
     const safeName =
       path
         .basename(String(file.originalname || "attachment"))
         .replace(/[^\w.\- ()]/g, "_")
         .slice(0, 120) || "attachment";
+
+    if (useSupabaseStorage) {
+      await uploadToSupabase(`${ticketId}/${storedName}`, file.buffer, mime);
+    } else {
+      const ticketDir = path.join(supportUploadRoot, String(ticketId));
+      fs.mkdirSync(ticketDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(ticketDir, storedName), file.buffer, {
+        mode: 0o600,
+      });
+    }
 
     await db
       .prepare(
