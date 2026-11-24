@@ -422,6 +422,50 @@ export async function createWeeklyPaymentService({
       .all();
   }
 
+  async function backfillProvisionalRiderIds() {
+    try {
+      const blankProv = await db
+        .prepare(
+          "SELECT id, rider_key, week_key FROM weekly_payments WHERE rider_key LIKE 'provisional:%' AND (rider_id IS NULL OR rider_id = '')",
+        )
+        .all();
+      if (!blankProv.length) return;
+      const pend = await db
+        .prepare(
+          "SELECT rider_name, excel_rider_id, week_key, payload FROM weekly_payment_pending WHERE excel_rider_id <> ''",
+        )
+        .all();
+      const byKeyAndWeek = new Map();
+      const byKeyOnly = new Map();
+      for (const p of pend) {
+        let sheetId = clean(p.excel_rider_id);
+        if (!sheetId && p.payload) {
+          try {
+            sheetId = clean(JSON.parse(p.payload).riderId);
+          } catch {}
+        }
+        if (!sheetId) continue;
+        const pKey = provisionalKeyFor(p.rider_name, sheetId);
+        byKeyAndWeek.set(pKey + "\u0000" + p.week_key, sheetId);
+        if (!byKeyOnly.has(pKey)) byKeyOnly.set(pKey, sheetId);
+      }
+      const updateStmt = db.prepare(
+        "UPDATE weekly_payments SET rider_id = ? WHERE id = ?",
+      );
+      for (const row of blankProv) {
+        const found =
+          byKeyAndWeek.get(row.rider_key + "\u0000" + row.week_key) ||
+          byKeyOnly.get(row.rider_key) ||
+          "";
+        if (found) await updateStmt.run(found.slice(0, 100), row.id);
+      }
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  await backfillProvisionalRiderIds();
+
   async function applyRecords(
     records,
     { fileName, fileHash, actor, recordImport = true },
@@ -465,7 +509,7 @@ export async function createWeeklyPaymentService({
       const provisionalRows = resolved.review.map((x) => ({
         ...x.record,
         riderKey: provisionalKeyOf(x.record),
-        riderId: "",
+        riderId: clean(x.record.riderId),
       }));
       toSave = [
         ...pendingResolved,
@@ -547,7 +591,7 @@ export async function createWeeklyPaymentService({
       const txUpsertPending = tx.prepare(
         `INSERT INTO weekly_payment_pending(pending_key, excel_rider_id, rider_name, week_key, week_label, week_start, week_end, payload, reason, file_name, status, mapped_rider_id, created_at, updated_at)
          VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING','',?,?)
-         ON CONFLICT(pending_key) DO UPDATE SET payload = excluded.payload, reason = excluded.reason, file_name = excluded.file_name, status = 'PENDING', updated_at = excluded.updated_at`,
+         ON CONFLICT(pending_key) DO UPDATE SET excel_rider_id = excluded.excel_rider_id, payload = excluded.payload, reason = excluded.reason, file_name = excluded.file_name, status = 'PENDING', updated_at = excluded.updated_at`,
       );
       const txSetPendingReason = tx.prepare(
         "UPDATE weekly_payment_pending SET reason = ?, updated_at = ? WHERE id = ?",
@@ -607,12 +651,12 @@ export async function createWeeklyPaymentService({
       const upsertProvisional = tx.prepare(
         `INSERT INTO weekly_payment_provisional_riders(mapping_key,excel_rider_id,rider_name,status,reason,first_seen_at,updated_at,verified_rider_id)
          VALUES(?,?,?,'PENDING_VERIFICATION',?,?,?,'')
-         ON CONFLICT(mapping_key) DO UPDATE SET reason=excluded.reason,updated_at=excluded.updated_at`,
+         ON CONFLICT(mapping_key) DO UPDATE SET excel_rider_id=excluded.excel_rider_id,reason=excluded.reason,updated_at=excluded.updated_at`,
       );
       for (const x of [...review, ...pendingReview]) {
         await upsertProvisional.run(
           mappingKeyOf(x.record),
-          normalizeRiderKey(x.record.riderId),
+          clean(x.record.riderId),
           clean(x.record.riderName).slice(0, 200),
           x.reason,
           now,
@@ -622,7 +666,7 @@ export async function createWeeklyPaymentService({
       for (const x of review) {
         await txUpsertPending.run(
           pendingKeyOf(x.record),
-          normalizeRiderKey(x.record.riderId),
+          clean(x.record.riderId),
           clean(x.record.riderName).slice(0, 200),
           x.record.weekKey,
           clean(x.record.weekLabel).slice(0, 200),
