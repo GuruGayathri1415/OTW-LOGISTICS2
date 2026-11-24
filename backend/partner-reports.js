@@ -19,6 +19,14 @@ const num = (v) =>
 const isBlankCount = (v) =>
   v === null || v === undefined || v === "" || !Number.isFinite(Number(v));
 
+const normName = (v) =>
+  String(v ?? "")
+    .toLowerCase()
+    .replace(/[()[\]{}]/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
 // Normalize row field names in case PostgreSQL returned lowercase aliases.
 function normalizeRow(r = {}) {
   return {
@@ -76,6 +84,61 @@ export const listApprovedRidersForVendor = (db, accountId) =>
   listApprovedRidersFor(db, accountId, "Vendor");
 export const listApprovedRidersForFranchise = (db, accountId) =>
   listApprovedRidersFor(db, accountId, "Franchise");
+
+// Promotes any provisional weekly_payments rows matching an approved rider (by Rider ID or exact normalized name)
+// so rows imported before the rider was approved immediately show up in Orders and Reports.
+async function promoteApprovedRiderRows(db, role, accountId) {
+  const source = role === "vendor" ? "Vendor" : "Franchise";
+  try {
+    const approved = await db
+      .prepare(
+        `SELECT rider_id, rider_name
+         FROM rider_registrations
+         WHERE owner_account_id = ? AND registration_source = ? AND application_status = 'APPROVED' AND trim(rider_id) <> ''`,
+      )
+      .all(accountId, source);
+    if (!approved || !approved.length) return;
+
+    const provRows = await db
+      .prepare(
+        `SELECT id, rider_key, week_key, rider_id, rider_name
+         FROM weekly_payments
+         WHERE rider_key LIKE 'provisional:%'`,
+      )
+      .all();
+    if (!provRows || !provRows.length) return;
+
+    const updateStmt = db.prepare(
+      `UPDATE weekly_payments
+       SET rider_key = ?, rider_id = ?
+       WHERE id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM weekly_payments existing
+           WHERE existing.rider_key = ? AND existing.week_key = weekly_payments.week_key
+         )`,
+    );
+
+    for (const r of approved) {
+      const rid = String(r.rider_id || "").trim();
+      const rKey = normalizeRiderKey(rid);
+      const rName = normName(r.rider_name);
+      if (!rid || !rKey) continue;
+      const verifiedKey = "id:" + rid.toLowerCase();
+
+      for (const p of provRows) {
+        const pIdKey = normalizeRiderKey(p.rider_id);
+        const pName = normName(p.rider_name);
+        const idMatches = pIdKey && pIdKey === rKey;
+        const nameMatches = !pIdKey && rName && pName === rName;
+        if (idMatches || nameMatches) {
+          await updateStmt.run(verifiedKey, rid, p.id, verifiedKey);
+        }
+      }
+    }
+  } catch {
+    /* non-fatal */
+  }
+}
 
 // One row per rider per period. The same rider and period sent twice is counted once.
 function uniqueRows(records) {
@@ -226,6 +289,7 @@ export function buildPartnerReport(records, riders, { week = "" } = {}) {
 // role 'vendor' or 'franchise'; each partner only ever gets its own riders' rows (see weekly-payments.js).
 export async function partnerPortalPayload(db, role, accountId, week = "") {
   const isVendor = role === "vendor";
+  await promoteApprovedRiderRows(db, role, accountId);
   const [rawRecords, riders] = await Promise.all([
     isVendor ? listForVendor(db, accountId) : listForFranchise(db, accountId),
     listApprovedRidersFor(db, accountId, isVendor ? "Vendor" : "Franchise"),
