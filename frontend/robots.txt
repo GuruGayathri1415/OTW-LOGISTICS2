@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /dashboard/
+Disallow: /vendor/
+Disallow: /franchise/
+Disallow: /api/
+
+Sitemap: https://onthewayindia.com/sitemap.xml
