@@ -163,20 +163,32 @@ if (Number(adminCountRow?.n || 0) === 0) {
     });
     lines.push(`  ${name.padEnd(18)} ${email.padEnd(32)} ${password}`);
   }
-  const text = `ON THE WAY LOGISTICS - first admin sign-in (created ${new Date().toLocaleString()})\n\nSign in at /dashboard/ with the email and temporary password below.\nEach admin must choose their own password at first sign-in. Give each person only their own line,\nthen DELETE THIS FILE.\n\n${lines.join("\n")}\n`;
+  const text = `ON THE WAY LOGISTICS - first admin sign-in (created ${new Date().toLocaleString()})
+
+Sign in at /dashboard/ with the email and temporary password below.
+Each admin must choose their own password at first sign-in. Give each person only their own line,
+then DELETE THIS FILE.
+
+${lines.join("
+")}
+`;
   try {
     fs.writeFileSync(path.join(DATA_DIR, "FIRST-ADMIN-PASSWORDS.txt"), text, {
       mode: 0o600,
     });
   } catch {}
   console.log(
-    "\n" +
+    "
+" +
       "=".repeat(78) +
-      "\n" +
+      "
+" +
       text +
-      "(Also saved to backend/FIRST-ADMIN-PASSWORDS.txt)\n" +
+      "(Also saved to backend/FIRST-ADMIN-PASSWORDS.txt)
+" +
       "=".repeat(78) +
-      "\n",
+      "
+",
   );
 }
 
@@ -315,6 +327,42 @@ app.use(
     },
   }),
 );
+
+// ===================== Search Engine Crawling & Indexing (robots.txt & sitemap.xml) =====================
+const SITE_URL = String(
+  process.env.PUBLIC_URL || "https://onthewayindia.com",
+).replace(/\/+$/, "");
+
+app.get("/robots.txt", (_req, res) => {
+  res.type("text/plain").send(
+    [
+      "User-agent: *",
+      "Allow: /",
+      "Disallow: /dashboard/",
+      "Disallow: /vendor/",
+      "Disallow: /franchise/",
+      "Disallow: /api/",
+      "",
+      `Sitemap: ${SITE_URL}/sitemap.xml`,
+      "",
+    ].join("
+"),
+  );
+});
+
+app.get("/sitemap.xml", (_req, res) => {
+  res.type("application/xml").send(
+    `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>${SITE_URL}/</loc>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>
+`,
+  );
+});
 
 const adminGuard = auth.requireRole("admin");
 async function adminEmailOf(req) {
@@ -1588,7 +1636,8 @@ app.get(
       res.setHeader("Content-Type", doc.mime);
       res.setHeader(
         "Content-Disposition",
-        `attachment; filename="${String(doc.name || "document").replace(/[\\"\r\n]/g, "_")}"`,
+        `attachment; filename="${String(doc.name || "document").replace(/[\"
+]/g, "_")}"`,
       );
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.send(plaintext);
@@ -2009,7 +2058,10 @@ const adminNotifications = await createAdminNotifications({
 
 const adminStreams = new Set();
 function broadcastAdminNotification(data) {
-  const chunk = `event: notification\ndata: ${JSON.stringify(data)}\n\n`;
+  const chunk = `event: notification
+data: ${JSON.stringify(data)}
+
+`;
   for (const client of adminStreams) {
     try {
       client.res.write(chunk);
@@ -2046,14 +2098,19 @@ app.get("/api/admin/notifications/stream", adminGuard, async (req, res) => {
   adminStreams.add(client);
   const unread = await adminNotifications.unreadCount(req.account.id);
   res.write(
-    `event: ready\ndata: ${JSON.stringify({ unreadCount: unread })}\n\n`,
+    `event: ready
+data: ${JSON.stringify({ unreadCount: unread })}
+
+`,
   );
   const heartbeat = setInterval(async () => {
     if (!(await auth.getSession(req, "admin"))) {
       cleanup();
       return res.end();
     }
-    res.write(": ping\n\n");
+    res.write(": ping
+
+");
   }, 25_000);
   const cleanup = () => {
     clearInterval(heartbeat);
@@ -2422,7 +2479,7 @@ app.get("/api/portal/files/:id", portalGuard, async (req, res) => {
   if (!row) return res.status(404).json({ error: "File not found." });
   res.set({
     "Content-Type": row.mime,
-    "Content-Disposition": `inline; filename="${row.original_name.replace(/["\\]/g, "")}"`,
+    "Content-Disposition": `inline; filename="${row.original_name.replace(/["\]/g, "")}"`,
     "Cache-Control": "private, no-store",
     "X-Content-Type-Options": "nosniff",
   });
@@ -2920,7 +2977,8 @@ function getMailTransporter() {
 }
 const oneLine = (v) =>
   String(v || "")
-    .replace(/[\r\n]+/g, " ")
+    .replace(/[
+]+/g, " ")
     .trim();
 
 async function supportAdminRecipients() {
@@ -3127,12 +3185,19 @@ app.listen(PORT, (err) => {
   if (err) {
     if (err.code === "EADDRINUSE")
       console.error(
-        `\n  NOT STARTED: port ${PORT} is already in use. Another copy of this server is still running,` +
-          `\n  maybe from an older project folder. Your browser is talking to THAT copy and its database,` +
-          `\n  so sign-ins and data will not match this folder.` +
-          `\n  Close the other server window (or restart the computer), then run START-WINDOWS.bat again.\n`,
+        `
+  NOT STARTED: port ${PORT} is already in use. Another copy of this server is still running,` +
+          `
+  maybe from an older project folder. Your browser is talking to THAT copy and its database,` +
+          `
+  so sign-ins and data will not match this folder.` +
+          `
+  Close the other server window (or restart the computer), then run START-WINDOWS.bat again.
+`,
       );
-    else console.error(`\n  NOT STARTED: ${err.message}\n`);
+    else console.error(`
+  NOT STARTED: ${err.message}
+`);
     process.exit(1);
   }
   console.log(
