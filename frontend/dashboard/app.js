@@ -614,31 +614,53 @@ function ensureEmployees() {
   if (!Array.isArray(db.employees)) db.employees = [];
 }
 
+function maskSensitive(val, keep = 4) {
+  const s = String(val || "").replace(/\s+/g, "");
+  if (!s) return "—";
+  if (s.length <= keep) return s;
+  return "X".repeat(Math.max(4, s.length - keep)) + s.slice(-keep);
+}
+
 function employee() {
   ensureEmployees();
+  const active = db.employees.filter((e) => (e.status || "Active") === "Active").length;
+  const onHold = db.employees.filter((e) => e.status === "On Hold").length;
+  const inactive = db.employees.filter((e) => e.status === "Inactive").length;
+  const verifiedDocs = db.employees.filter((e) => e.docVerification === "Verified").length;
   return (
     layout(
       "Employees",
-      "View and manage company employees, roles and departments.",
-      '<button class="primary" id="addEmployeeBtn">+ Add Employee</button>',
+      "Employee registration, onboarding form, documents, bank details and HR/Admin approvals.",
+      '<button class="primary" id="addEmployeeBtn">+ New Employee Joining Form</button>',
     ) +
     `<div class="cards">
       ${stat("Total Employees", db.employees.length, "empStatTotal")}
-      ${stat("Active", db.employees.filter((e) => e.status === "Active").length, "empStatActive")}
-      ${stat("Inactive", db.employees.filter((e) => e.status !== "Active").length, "empStatInactive")}
+      ${stat("Active", active, "empStatActive")}
+      ${stat("On Hold / Inactive", onHold + inactive, "empStatInactive")}
+      ${stat("Docs Verified", verifiedDocs, "empStatVerified")}
     </div>
     <div class="card">
-      <input class="search" id="employeeSearch" placeholder="Search employee name, ID, role, department or phone..." autocomplete="off">
+      <div class="hub-list-toolbar">
+        <div><h3>Employee Directory</h3><span class="muted">Sensitive IDs and bank account numbers are masked in routine views.</span></div>
+        <select class="status-filter" id="employeeStatusFilter" aria-label="Filter by employee status">
+          <option value="">All statuses</option>
+          <option value="Active">Active</option>
+          <option value="On Hold">On Hold</option>
+          <option value="Inactive">Inactive</option>
+        </select>
+      </div>
+      <input class="search" id="employeeSearch" placeholder="Search employee name, ID, designation, department, phone or work location..." autocomplete="off">
       <div class="table-wrap">
         <table class="table">
           <thead>
             <tr>
               <th>Employee ID</th>
-              <th>Name</th>
-              <th>Role</th>
+              <th>Full Name</th>
+              <th>Designation / Role</th>
               <th>Department</th>
-              <th>Phone</th>
-              <th>Email</th>
+              <th>Mobile</th>
+              <th>Work Location</th>
+              <th>Doc Verification</th>
               <th>Status</th>
               <th>Actions</th>
             </tr>
@@ -650,52 +672,82 @@ function employee() {
   );
 }
 
-function paintEmployees(q = "") {
+function paintEmployees(q = "", statusFilter = "") {
   ensureEmployees();
   const body = $("#employeeRows");
   if (!body) return;
-  const term = String(q || "")
-    .trim()
-    .toLowerCase();
-  const list = !term
-    ? db.employees
-    : db.employees.filter((e) =>
-        [e.id, e.name, e.role, e.department, e.phone, e.email, e.status]
-          .join(" ")
-          .toLowerCase()
-          .includes(term),
-      );
+  const term = String(q || "").trim().toLowerCase();
+  const st = String(statusFilter || "").trim();
+  const list = db.employees.filter((e) => {
+    if (st && (e.status || "Active") !== st) return false;
+    if (!term) return true;
+    return [
+      e.id,
+      e.name,
+      e.fatherOrSpouse,
+      e.role,
+      e.department,
+      e.phone,
+      e.email,
+      e.workLocation,
+      e.reportingManager,
+      e.status,
+      e.docVerification,
+    ]
+      .join(" ")
+      .toLowerCase()
+      .includes(term);
+  });
+
   body.innerHTML = list.length
     ? list
-        .map(
-          (e) =>
-            `<tr>
+        .map((e) => {
+          const empStatus = e.status || "Active";
+          const statusCls =
+            empStatus === "Active"
+              ? "success"
+              : empStatus === "On Hold"
+                ? "warning"
+                : "danger";
+          const docVer = e.docVerification || "Pending";
+          const docCls =
+            docVer === "Verified"
+              ? "success"
+              : docVer === "Rejected"
+                ? "danger"
+                : "warning";
+          return `<tr>
               <td><b>${esc(e.id)}</b></td>
-              <td>${esc(e.name)}</td>
+              <td><b>${esc(e.name)}</b>${e.email ? `<br><small class="muted">${esc(e.email)}</small>` : ""}</td>
               <td>${esc(e.role || "—")}</td>
               <td>${esc(e.department || "—")}</td>
               <td>${esc(e.phone || "—")}</td>
-              <td>${esc(e.email || "—")}</td>
-              <td><span class="badge ${e.status === "Active" ? "success" : "danger"}">${esc(e.status || "Active")}</span></td>
+              <td>${esc(e.workLocation || "—")}</td>
+              <td><span class="badge ${docCls}">${esc(docVer)}</span></td>
+              <td><span class="badge ${statusCls}">${esc(empStatus)}</span></td>
               <td>
                 <div class="mini-actions">
+                  <button class="btn-sm" onclick="viewEmployee('${esc(e.id)}')">View Form</button>
                   <button class="btn-sm" onclick="editEmployee('${esc(e.id)}')">Edit</button>
                   <button class="btn-sm danger" onclick="deleteEmployee('${esc(e.id)}')">Delete</button>
                 </div>
               </td>
-            </tr>`,
-        )
+            </tr>`;
+        })
         .join("")
-    : `<tr><td colspan="8" class="empty">${term ? "No matching employees." : "No employees yet. Click + Add Employee."}</td></tr>`;
+    : `<tr><td colspan="9" class="empty">${term || st ? "No matching employees." : "No employees registered yet. Click + New Employee Joining Form."}</td></tr>`;
 }
 
 function bindEmployee() {
   ensureEmployees();
   $("#addEmployeeBtn")?.addEventListener("click", () => employeeModal());
-  $("#employeeSearch")?.addEventListener("input", (e) =>
-    paintEmployees(e.target.value),
-  );
-  paintEmployees();
+  const searchEl = $("#employeeSearch");
+  const statusEl = $("#employeeStatusFilter");
+  const refresh = () =>
+    paintEmployees(searchEl?.value || "", statusEl?.value || "");
+  searchEl?.addEventListener("input", refresh);
+  statusEl?.addEventListener("change", refresh);
+  refresh();
 }
 
 function employeeModal(emp = null) {
@@ -703,33 +755,154 @@ function employeeModal(emp = null) {
   const editing = !!emp;
   const defaultId =
     emp?.id || "EMP-" + String(db.employees.length + 1).padStart(4, "0");
+  const c = emp?.checklist || {};
+  const opt = (list, val) =>
+    list
+      .map(
+        (x) =>
+          `<option value="${esc(x)}" ${val === x ? "selected" : ""}>${esc(x)}</option>`,
+      )
+      .join("");
+
   openModal(`
-    <h3>${editing ? "Edit Employee" : "Add Employee"}</h3>
+    <h3>${editing ? "Edit Employee Joining Form" : "Company Employee Joining Form"}</h3>
+    <p class="muted">Employee Registration &amp; Onboarding Record</p>
     <form id="employeeForm" class="form-grid">
+      <h4 class="span2">1. Personal Details</h4>
+      <div class="field"><label>Full Name *</label><input id="empName" required value="${esc(emp?.name || "")}"></div>
       <div class="field"><label>Employee ID *</label><input id="empId" required value="${esc(defaultId)}"></div>
-      <div class="field"><label>Name *</label><input id="empName" required value="${esc(emp?.name || "")}"></div>
-      <div class="field"><label>Role</label><input id="empRole" placeholder="e.g. Operations Executive" value="${esc(emp?.role || "")}"></div>
-      <div class="field"><label>Department</label><input id="empDept" placeholder="e.g. Logistics, Support" value="${esc(emp?.department || "")}"></div>
-      <div class="field"><label>Phone</label><input id="empPhone" inputmode="numeric" maxlength="15" value="${esc(emp?.phone || "")}"></div>
-      <div class="field"><label>Email</label><input id="empEmail" type="email" value="${esc(emp?.email || "")}"></div>
-      <div class="field"><label>Status</label><select id="empStatus"><option ${!emp || emp.status === "Active" ? "selected" : ""}>Active</option><option ${emp?.status === "Inactive" ? "selected" : ""}>Inactive</option></select></div>
-      <div class="modal-actions span2"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="submit" class="primary">${editing ? "Save Changes" : "Save Employee"}</button></div>
+      <div class="field"><label>Father's / Spouse's Name</label><input id="empFatherSpouse" value="${esc(emp?.fatherOrSpouse || "")}"></div>
+      <div class="field"><label>Date of Birth</label><input id="empDob" type="date" value="${esc(emp?.dob || "")}"></div>
+      <div class="field"><label>Gender</label><select id="empGender">${opt(["", "Male", "Female", "Other", "Prefer not to say"], emp?.gender || "")}</select></div>
+      <div class="field"><label>Marital Status (Optional)</label><select id="empMarital">${opt(["", "Single", "Married", "Other"], emp?.maritalStatus || "")}</select></div>
+      <div class="field"><label>Aadhaar Number (if required)</label><input id="empAadhaar" inputmode="numeric" maxlength="14" placeholder="12-digit Aadhaar (optional)" value="${esc(emp?.aadhaarNumber || "")}"></div>
+      <div class="field"><label>PAN Number</label><input id="empPan" maxlength="10" style="text-transform:uppercase" placeholder="ABCDE1234F" value="${esc(emp?.panNumber || "")}"></div>
+      <div class="field"><label>Blood Group (Optional)</label><select id="empBlood">${opt(["", "A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"], emp?.bloodGroup || "")}</select></div>
+      <div class="field"><label>Nationality (Optional)</label><input id="empNationality" placeholder="e.g. Indian" value="${esc(emp?.nationality || "Indian")}"></div>
+
+      <h4 class="span2">2. Contact Details</h4>
+      <div class="field"><label>Mobile Number *</label><input id="empPhone" inputmode="numeric" maxlength="15" required value="${esc(emp?.phone || "")}"></div>
+      <div class="field"><label>Alternative Number</label><input id="empAltPhone" inputmode="numeric" maxlength="15" value="${esc(emp?.altPhone || "")}"></div>
+      <div class="field"><label>Email ID</label><input id="empEmail" type="email" value="${esc(emp?.email || "")}"></div>
+      <div class="field"><label>Emergency Contact Name</label><input id="empEmergName" value="${esc(emp?.emergencyContactName || "")}"></div>
+      <div class="field"><label>Emergency Contact Number</label><input id="empEmergPhone" inputmode="numeric" maxlength="15" value="${esc(emp?.emergencyContactPhone || "")}"></div>
+      <div class="field"><label>Relationship</label><input id="empEmergRel" placeholder="e.g. Father, Spouse, Sibling" value="${esc(emp?.emergencyRelationship || "")}"></div>
+      <div class="field span2"><label>Current Address</label><textarea id="empCurrAddr" rows="2">${esc(emp?.currentAddress || "")}</textarea></div>
+      <div class="field span2"><label>Permanent Address</label><textarea id="empPermAddr" rows="2">${esc(emp?.permanentAddress || "")}</textarea></div>
+
+      <h4 class="span2">3. Employment Details</h4>
+      <div class="field"><label>Designation / Job Role *</label><input id="empRole" required placeholder="e.g. Hub Manager, Operations Executive" value="${esc(emp?.role || "")}"></div>
+      <div class="field"><label>Department</label><input id="empDept" placeholder="e.g. Operations, Logistics, HR, Accounts" value="${esc(emp?.department || "")}"></div>
+      <div class="field"><label>Date of Joining</label><input id="empJoined" type="date" value="${esc(emp?.dateOfJoining || "")}"></div>
+      <div class="field"><label>Employment Type</label><select id="empType">${opt(["Full-Time", "Part-Time", "Contract", "Intern", "Probation"], emp?.employmentType || "Full-Time")}</select></div>
+      <div class="field"><label>Work Location</label><input id="empWorkLoc" placeholder="e.g. Hyderabad Hub" value="${esc(emp?.workLocation || "")}"></div>
+      <div class="field"><label>Reporting Manager</label><input id="empManager" value="${esc(emp?.reportingManager || "")}"></div>
+      <div class="field"><label>Previous Employer (if applicable)</label><input id="empPrevEmployer" value="${esc(emp?.previousEmployer || "")}"></div>
+      <div class="field"><label>Last Working Date</label><input id="empLastWorkDate" type="date" value="${esc(emp?.lastWorkingDate || "")}"></div>
+
+      <h4 class="span2">4. Bank Details</h4>
+      <div class="field"><label>Account Holder Name</label><input id="empBankHolder" value="${esc(emp?.bankHolderName || "")}"></div>
+      <div class="field"><label>Bank Name</label><input id="empBankName" value="${esc(emp?.bankName || "")}"></div>
+      <div class="field"><label>Account Number</label><input id="empBankAcc" inputmode="numeric" maxlength="24" value="${esc(emp?.bankAccountNumber || "")}"></div>
+      <div class="field"><label>IFSC Code</label><input id="empBankIfsc" maxlength="11" style="text-transform:uppercase" value="${esc(emp?.bankIfsc || "")}"></div>
+      <div class="field"><label>Branch Name</label><input id="empBankBranch" value="${esc(emp?.bankBranch || "")}"></div>
+      <div class="field"><label>Account Type</label><select id="empBankType">${opt(["Savings", "Current", "Salary"], emp?.bankAccountType || "Savings")}</select></div>
+
+      <h4 class="span2">5. Document Checklist</h4>
+      <div class="field"><label class="check"><input type="checkbox" id="chkAadhaar" ${c.aadhaar ? "checked" : ""}> Aadhaar Card (if required)</label></div>
+      <div class="field"><label class="check"><input type="checkbox" id="chkPan" ${c.pan ? "checked" : ""}> PAN Card</label></div>
+      <div class="field"><label class="check"><input type="checkbox" id="chkPhoto" ${c.photo ? "checked" : ""}> Passport-Size Photograph</label></div>
+      <div class="field"><label class="check"><input type="checkbox" id="chkResume" ${c.resume ? "checked" : ""}> Updated Resume / CV</label></div>
+      <div class="field"><label class="check"><input type="checkbox" id="chkEdu" ${c.education ? "checked" : ""}> Educational Certificates</label></div>
+      <div class="field"><label class="check"><input type="checkbox" id="chkBank" ${c.bankProof ? "checked" : ""}> Bank Proof / Cancelled Cheque</label></div>
+      <div class="field"><label class="check"><input type="checkbox" id="chkExp" ${c.experienceLetter ? "checked" : ""}> Experience / Relieving Letter (if applicable)</label></div>
+      <div class="field"><label class="check"><input type="checkbox" id="chkOffer" ${c.offerLetter ? "checked" : ""}> Signed Offer / Appointment Letter</label></div>
+
+      <h4 class="span2">6. HR / Admin Use Only</h4>
+      <div class="field"><label>Document Verification</label><select id="empDocVer">${opt(["Pending", "Verified", "Rejected"], emp?.docVerification || "Pending")}</select></div>
+      <div class="field"><label>Background Verification (if applicable)</label><select id="empBgVer">${opt(["Pending", "Clear", "Review Required"], emp?.bgVerification || "Pending")}</select></div>
+      <div class="field"><label>HR Approval Name</label><input id="empHrName" value="${esc(emp?.hrApprovalName || "")}"></div>
+      <div class="field"><label>HR Approval Date</label><input id="empHrDate" type="date" value="${esc(emp?.hrApprovalDate || "")}"></div>
+      <div class="field"><label>Admin Approval Name</label><input id="empAdminName" value="${esc(emp?.adminApprovalName || currentUser?.name || "")}"></div>
+      <div class="field"><label>Admin Approval Date</label><input id="empAdminDate" type="date" value="${esc(emp?.adminApprovalDate || "")}"></div>
+      <div class="field"><label>Employee Status</label><select id="empStatus">${opt(["Active", "Inactive", "On Hold"], emp?.status || "Active")}</select></div>
+      <div class="field"><label>Declaration Date</label><input id="empDeclDate" type="date" value="${esc(emp?.declarationDate || new Date().toISOString().slice(0, 10))}"></div>
+      <div class="field span2">
+        <label class="check"><input type="checkbox" id="empDeclared" ${!emp || emp.declared !== false ? "checked" : ""}> Employee Declaration: Confirmed that the information and documents provided are true and correct, and agreed to inform the company of any changes to contact or bank details.</label>
+      </div>
+
+      <p class="hint span2">Privacy note: Collect only information necessary for employment and applicable legal or payroll requirements. Sensitive numbers are masked in routine views.</p>
+      <div class="modal-actions span2">
+        <button type="button" class="ghost" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="primary">${editing ? "Save Changes" : "Save Joining Form"}</button>
+      </div>
     </form>
   `);
+  $("#modal .modal-box")?.classList.add("modal-wide");
 
   $("#employeeForm").onsubmit = (e) => {
     e.preventDefault();
     const record = {
       id: $("#empId").value.trim(),
       name: $("#empName").value.trim(),
+      fatherOrSpouse: $("#empFatherSpouse").value.trim(),
+      dob: $("#empDob").value,
+      gender: $("#empGender").value,
+      maritalStatus: $("#empMarital").value,
+      aadhaarNumber: $("#empAadhaar").value.replace(/\D/g, "").slice(0, 12),
+      panNumber: $("#empPan").value.trim().toUpperCase(),
+      bloodGroup: $("#empBlood").value,
+      nationality: $("#empNationality").value.trim(),
+
+      phone: $("#empPhone").value.trim(),
+      altPhone: $("#empAltPhone").value.trim(),
+      email: $("#empEmail").value.trim(),
+      emergencyContactName: $("#empEmergName").value.trim(),
+      emergencyContactPhone: $("#empEmergPhone").value.trim(),
+      emergencyRelationship: $("#empEmergRel").value.trim(),
+      currentAddress: $("#empCurrAddr").value.trim(),
+      permanentAddress: $("#empPermAddr").value.trim(),
+
       role: $("#empRole").value.trim(),
       department: $("#empDept").value.trim(),
-      phone: $("#empPhone").value.trim(),
-      email: $("#empEmail").value.trim(),
+      dateOfJoining: $("#empJoined").value,
+      employmentType: $("#empType").value,
+      workLocation: $("#empWorkLoc").value.trim(),
+      reportingManager: $("#empManager").value.trim(),
+      previousEmployer: $("#empPrevEmployer").value.trim(),
+      lastWorkingDate: $("#empLastWorkDate").value,
+
+      bankHolderName: $("#empBankHolder").value.trim(),
+      bankName: $("#empBankName").value.trim(),
+      bankAccountNumber: $("#empBankAcc").value.trim(),
+      bankIfsc: $("#empBankIfsc").value.trim().toUpperCase(),
+      bankBranch: $("#empBankBranch").value.trim(),
+      bankAccountType: $("#empBankType").value,
+
+      checklist: {
+        aadhaar: $("#chkAadhaar").checked,
+        pan: $("#chkPan").checked,
+        photo: $("#chkPhoto").checked,
+        resume: $("#chkResume").checked,
+        education: $("#chkEdu").checked,
+        bankProof: $("#chkBank").checked,
+        experienceLetter: $("#chkExp").checked,
+        offerLetter: $("#chkOffer").checked,
+      },
+
+      docVerification: $("#empDocVer").value,
+      bgVerification: $("#empBgVer").value,
+      hrApprovalName: $("#empHrName").value.trim(),
+      hrApprovalDate: $("#empHrDate").value,
+      adminApprovalName: $("#empAdminName").value.trim(),
+      adminApprovalDate: $("#empAdminDate").value,
       status: $("#empStatus").value,
+      declarationDate: $("#empDeclDate").value,
+      declared: $("#empDeclared").checked,
+      updatedAt: new Date().toISOString(),
     };
     if (!record.id || !record.name)
-      return toast("Employee ID and Name are required.");
+      return toast("Employee ID and Full Name are required.");
     if (editing) {
       Object.assign(emp, record);
     } else {
@@ -738,14 +911,106 @@ function employeeModal(emp = null) {
       ) {
         return toast("This Employee ID already exists.");
       }
+      record.createdAt = new Date().toISOString();
       db.employees.unshift(record);
     }
     save();
     closeModal();
     render("employee");
-    toast(editing ? "Employee updated" : "Employee added");
+    toast(editing ? "Employee joining form updated" : "Employee joining form saved");
   };
 }
+
+window.viewEmployee = (id) => {
+  const e = (db.employees || []).find((x) => x.id === id);
+  if (!e) return toast("Employee not found.");
+  const c = e.checklist || {};
+  const item = (k, v) => `<div><b>${k}</b><p>${esc(v || "—")}</p></div>`;
+  const chk = (label, ok) =>
+    `<div class="field"><span>${ok ? "☑" : "☐"} ${esc(label)}</span></div>`;
+
+  openModal(`
+    <h3>Company Employee Joining Form · ${esc(e.name)} (${esc(e.id)})</h3>
+    <p class="muted">Employee Registration &amp; Onboarding Record</p>
+
+    <h4>1. Personal Details</h4>
+    <div class="grid2">
+      ${item("Full Name", e.name)}
+      ${item("Employee ID", e.id)}
+      ${item("Father's / Spouse's Name", e.fatherOrSpouse)}
+      ${item("Date of Birth", e.dob)}
+      ${item("Gender", e.gender)}
+      ${item("Marital Status", e.maritalStatus)}
+      ${item("Aadhaar Number (Masked)", maskSensitive(e.aadhaarNumber, 4))}
+      ${item("PAN Number (Masked)", maskSensitive(e.panNumber, 4))}
+      ${item("Blood Group", e.bloodGroup)}
+      ${item("Nationality", e.nationality)}
+    </div>
+
+    <h4>2. Contact Details</h4>
+    <div class="grid2">
+      ${item("Mobile Number", e.phone)}
+      ${item("Alternative Number", e.altPhone)}
+      ${item("Email ID", e.email)}
+      ${item("Emergency Contact Name", e.emergencyContactName)}
+      ${item("Emergency Contact Number", e.emergencyContactPhone)}
+      ${item("Relationship", e.emergencyRelationship)}
+      ${item("Current Address", e.currentAddress)}
+      ${item("Permanent Address", e.permanentAddress)}
+    </div>
+
+    <h4>3. Employment Details</h4>
+    <div class="grid2">
+      ${item("Designation / Job Role", e.role)}
+      ${item("Department", e.department)}
+      ${item("Date of Joining", e.dateOfJoining)}
+      ${item("Employment Type", e.employmentType)}
+      ${item("Work Location", e.workLocation)}
+      ${item("Reporting Manager", e.reportingManager)}
+      ${item("Previous Employer", e.previousEmployer)}
+      ${item("Last Working Date", e.lastWorkingDate)}
+    </div>
+
+    <h4>4. Bank Details</h4>
+    <div class="grid2">
+      ${item("Account Holder Name", e.bankHolderName)}
+      ${item("Bank Name", e.bankName)}
+      ${item("Account Number (Masked)", maskSensitive(e.bankAccountNumber, 4))}
+      ${item("IFSC Code", e.bankIfsc)}
+      ${item("Branch Name", e.bankBranch)}
+      ${item("Account Type", e.bankAccountType)}
+    </div>
+
+    <h4>5. Document Checklist</h4>
+    <div class="form-grid">
+      ${chk("Aadhaar Card (if required)", c.aadhaar)}
+      ${chk("PAN Card", c.pan)}
+      ${chk("Passport-Size Photograph", c.photo)}
+      ${chk("Updated Resume / CV", c.resume)}
+      ${chk("Educational Certificates", c.education)}
+      ${chk("Bank Proof / Cancelled Cheque", c.bankProof)}
+      ${chk("Experience / Relieving Letter (if applicable)", c.experienceLetter)}
+      ${chk("Signed Offer / Appointment Letter", c.offerLetter)}
+    </div>
+
+    <h4>6. HR / Admin Use Only</h4>
+    <div class="grid2">
+      ${item("Document Verification", e.docVerification || "Pending")}
+      ${item("Background Verification", e.bgVerification || "Pending")}
+      ${item("HR Approval", [e.hrApprovalName, e.hrApprovalDate].filter(Boolean).join(" · "))}
+      ${item("Admin Approval", [e.adminApprovalName, e.adminApprovalDate].filter(Boolean).join(" · "))}
+      ${item("Employee Status", e.status || "Active")}
+      ${item("Declaration Date", e.declarationDate)}
+    </div>
+
+    <p class="hint" style="margin-top:10px">Privacy note: Sensitive numbers (Aadhaar, PAN, Bank Account) are masked in routine views.</p>
+    <div class="modal-actions">
+      <button type="button" class="ghost" onclick="closeModal()">Close</button>
+      <button type="button" class="primary" onclick="closeModal();editEmployee('${esc(e.id)}')">Edit Form</button>
+    </div>
+  `);
+  $("#modal .modal-box")?.classList.add("modal-wide");
+};
 
 window.editEmployee = (id) => {
   const emp = (db.employees || []).find((x) => x.id === id);
@@ -753,7 +1018,7 @@ window.editEmployee = (id) => {
 };
 
 window.deleteEmployee = (id) => {
-  if (!confirm("Delete this employee?")) return;
+  if (!confirm("Delete this employee record?")) return;
   db.employees = (db.employees || []).filter((x) => x.id !== id);
   save();
   render("employee");
