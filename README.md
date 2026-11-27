@@ -8,7 +8,7 @@ OTW-Logistics/
   backend/              Node/Express + SQLite server (applications, emails, payments, portals' API)  -> Render
   frontend/             -> Vercel
     (root)              Public site with Franchise & Vendor application forms
-    dashboard/          Admin panel (applications under Client > Franchise / Vendor)
+    Admin/          Admin panel (applications under Client > Franchise / Vendor)
     vendor/             Vendor Management Portal
     franchise/          Franchise Management Portal
   render.yaml           Render blueprint
@@ -21,7 +21,7 @@ OTW-Logistics/
 2. Windows: double-click **START-WINDOWS.bat**. Mac/Linux: run `./start-mac-linux.sh`.
 3. Keep that window open. It is the server; if it is closed, applications cannot be received.
    - Website:      http://localhost:8080/
-   - Admin panel:  http://localhost:8080/dashboard/  (also linked in the website footer: "Staff / Admin Login")
+   - Admin panel:  http://localhost:8080/Admin/  (also linked in the website footer: "Staff / Admin Login")
    - Vendor portal: http://localhost:8080/vendor/  (website footer: "Vendor Login")
    - Franchise portal: http://localhost:8080/franchise/  (website footer: "Franchise Login")
 4. Only one copy can run at a time. If another copy (for example an older version from another folder) is still running,
